@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2
+
+- README screenshots from a demo board.
+
 ## 0.2.1
 
 - Fix installing from git: the frontend no longer needs the plugin SDK package at runtime, which git installs leave out.

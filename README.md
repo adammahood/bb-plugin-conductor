@@ -6,6 +6,8 @@ on a board with its stage, pull requests and review rounds. Agents send you
 **decisions** with their options and reasoning, you answer once, and the
 answer goes straight back to the agent that asked.
 
+![A Conductor board: the orchestrator, two decisions waiting, and the orchestrator thread in the side panel](docs/screenshots/board.png)
+
 ## What you get
 
 - **A board per orchestrator.** Tickets sit in stage sections: Planning, Plan
@@ -24,6 +26,11 @@ answer goes straight back to the agent that asked.
   decisions on the board, report stages, plan rounds, one PR open for review
   at a time, PRs split by layer, one agent per ticket, Code Review Workspace
   rounds. Add your own text too.
+
+<p>
+  <img src="docs/screenshots/stages.png" alt="Tickets in stage sections with PR stacks and agent status" width="320">
+  <img src="docs/screenshots/ticket.png" alt="A ticket with a blocking decision to answer" width="480">
+</p>
 
 ## Install
 
@@ -47,6 +54,8 @@ update can break parts of it; each surface fails on its own.
 3. Open **Settings** on the board to set your name for agents, the ticket key
    pattern, milestones from branch names, a plans folder and the rule
    switches. Agents pick up changes when their next session starts.
+
+![Board settings: options and agent rule switches](docs/screenshots/settings.png)
 
 ## Optional plugins
 
