@@ -7,7 +7,7 @@ import {
   useBbNavigate,
   type PluginNavPanelProps,
 } from "@get-bb/plugin-sdk/app";
-import { defineRpcContract } from "@get-bb/plugin-sdk";
+import { defineRpcContract } from "../src/rpc";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";

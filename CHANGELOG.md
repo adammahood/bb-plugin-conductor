@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- Fix installing from git: the frontend no longer needs the plugin SDK package at runtime, which git installs leave out.
+
 ## 0.2.0
 
 - Renamed from Phase Board to Conductor (plugin id `conductor`, CLI `bb conductor`, tools `conductor_ask_decision` and `conductor_report_stage`).

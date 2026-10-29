@@ -1,6 +1,6 @@
 // Shared wire types. app.tsx imports this module for types only, so the
 // zod schemas stay in the server bundle.
-import { defineRpcContract } from "@get-bb/plugin-sdk";
+import { defineRpcContract } from "./rpc";
 import { z } from "zod";
 import { boardOptionsPatchSchema, boardOptionsSchema } from "./options";
 
