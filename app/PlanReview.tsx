@@ -9,7 +9,18 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { rpcContract, type PlanMark, type PlanRound } from "../src/contract";
 import { lineLabel, splitPlan, type PlanBlock } from "../src/planBlocks";
-import { ago, errorText, shortTitle, useGo, usePlanRound, usePlanRounds, useTicketDetail } from "./hooks";
+import {
+  ago,
+  errorText,
+  shortTitle,
+  useGo,
+  useOpenDecisions,
+  usePlanRound,
+  usePlanRounds,
+  usePlansWaiting,
+  useTicketDetail,
+} from "./hooks";
+import { pickNextUp } from "./nextUp";
 
 type Kind = PlanMark["kind"];
 
@@ -372,6 +383,7 @@ function Decide({ round, marks, run }: { round: PlanRound; marks: number; run: (
   if (round.status !== "open") {
     return (
       <section aria-label="Outcome" className="space-y-1 text-sm">
+        {(round.status === "approved" || round.status === "changes_requested") && <UpNext round={round} />}
         <h2 className="font-semibold">Round {round.n}: {STATUS_LABELS[round.status]}</h2>
         {round.overallComment && <p className="whitespace-pre-wrap text-muted-foreground">{round.overallComment}</p>}
         {round.decidedAt && (
@@ -421,6 +433,38 @@ function Decide({ round, marks, run }: { round: PlanRound; marks: number; run: (
       </div>
       <Hint>Your marks and comment go to the agent as one message.</Hint>
     </section>
+  );
+}
+
+/** After a decision: the next plan waiting, the decisions left, or the way back to the board. */
+function UpNext({ round }: { round: PlanRound }) {
+  const go = useGo();
+  const plans = usePlansWaiting().data?.rounds;
+  const decisions = useOpenDecisions().data?.decisions;
+  if (!plans || !decisions) return null;
+  const next = pickNextUp(plans, decisions, { roundId: round.id, boardId: round.boardId });
+  return (
+    <div role="region" aria-label="Up next" className="mb-3 space-y-2 rounded-lg border border-border bg-card p-3">
+      {next.kind === "plan" && (
+        <>
+          <p className="text-xs text-muted-foreground">
+            Up next{next.more > 0 ? `, then ${next.more} more plan${next.more > 1 ? "s" : ""}` : ""}
+          </p>
+          <Button className="w-full" onClick={() => go.plan(next.round.boardId, next.round.ticketKey, next.round.n)}>
+            Next plan: {next.round.ticketKey} round {next.round.n}
+          </Button>
+        </>
+      )}
+      {next.kind === "decisions" && (
+        <Button className="w-full" onClick={() => go.board(next.boardId)}>
+          Answer {next.count} decision{next.count > 1 ? "s" : ""} on the board
+        </Button>
+      )}
+      {next.kind === "none" && <p className="text-xs text-muted-foreground">Nothing else waits on you.</p>}
+      <Button className="w-full" variant={next.kind === "none" ? "default" : "ghost"} onClick={() => go.board(round.boardId)}>
+        Back to the board
+      </Button>
+    </div>
   );
 }
 

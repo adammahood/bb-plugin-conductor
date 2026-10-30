@@ -432,3 +432,35 @@ describe("plan review", () => {
     );
   });
 });
+
+describe("after a plan decision", () => {
+  const decided: PlanRound = { ...round, status: "approved", decidedAt: 2, deliveredAt: 3 };
+  const other: PlanRound = { ...round, id: 10, ticketKey: "ABC-102", threadId: "thr_lead2", submittedAt: 5 };
+  const decidedRpc = (plans: PlanRound[], decisions: Decision[] = []) =>
+    handlers({
+      ...rpc(decisions, [summary], board, plans),
+      "plans.list": () => ({ rounds: [decided] }),
+      "plans.get": () => ({ round: decided, content: PLAN, marks: [] as PlanMark[] }),
+    });
+
+  it("offers the next plan waiting", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101/plan/1" }, { rpc: decidedRpc([other]) });
+    cleanup = () => slot.lifecycle.unmount();
+    fireEvent.click(await slot.findByRole("button", { name: "Next plan: ABC-102 round 1" }));
+    expect(slot.inspection.navigateCalls.at(-1)).toMatchObject({ options: { subPath: "1/ABC-102/plan/1" } });
+  });
+
+  it("points to the decisions left, or back to the board when nothing waits", async () => {
+    let slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101/plan/1" }, { rpc: decidedRpc([], [decision]) });
+    cleanup = () => slot.lifecycle.unmount();
+    fireEvent.click(await slot.findByRole("button", { name: "Answer 1 decision on the board" }));
+    expect(slot.inspection.navigateCalls.at(-1)).toMatchObject({ options: { subPath: "1" } });
+    slot.lifecycle.unmount();
+
+    slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101/plan/1" }, { rpc: decidedRpc([]) });
+    cleanup = () => slot.lifecycle.unmount();
+    expect(await slot.findByText("Nothing else waits on you.")).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "Back to the board" }));
+    expect(slot.inspection.navigateCalls.at(-1)).toMatchObject({ options: { subPath: "1" } });
+  });
+});
