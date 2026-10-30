@@ -48,6 +48,9 @@ interface Facts {
   reviews: WaitingReview[];
 }
 
+/** Reported stages (or none) in which a plan can still be waiting for review. */
+const PLANNING_STAGES = new Set<Stage | null>([null, "planning", "plan-review"]);
+
 const isRunning = (status: string | undefined) =>
   status !== undefined && (RUNNING_STATUSES as readonly string[]).includes(status);
 
@@ -182,12 +185,17 @@ export class BoardEngine {
       return;
     }
     for (const ticket of tickets) {
-      if (ticket.prs.length > 0) continue;
+      const latest = this.store.planRounds(ticket.key)[0] ?? null;
+      // Only a ticket still planning can be waiting on a plan; a stale inferred round closes.
+      const planning = ticket.prs.length === 0 && PLANNING_STAGES.has(ticket.reportedStage);
+      if (!planning) {
+        if (latest?.status === "open" && latest.source === "inferred") this.store.root.closeRound(latest.id, "withdrawn");
+        continue;
+      }
       const tag = `-${ticket.key.toLowerCase().replace(/-/g, "")}-`;
       const file = files.filter((name) => name.includes(tag)).sort().at(-1);
       if (!file) continue;
       try {
-        const latest = this.store.planRounds(ticket.key)[0] ?? null;
         if (latest?.status === "open" && latest.source === "inferred") {
           const repliedAt = await this.lastReplyAt(ticket.leadThreadId);
           if (repliedAt !== null && repliedAt > latest.submittedAt) this.store.root.closeRound(latest.id, "withdrawn");

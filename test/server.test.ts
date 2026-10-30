@@ -635,6 +635,18 @@ describe("plan review", () => {
     board = (await harness.behavior.callRpc("board.refresh", { boardId: 1 })) as Board;
     expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "plan-review", planRound: { n: 2, status: "open" } });
   });
+
+  it("leaves tickets that moved past planning alone, and closes a stale inferred round", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pb-plans-"));
+    writeFileSync(join(dir, "2026-10-28-abc102-image-sizes.md"), "# plan");
+    const { harness } = await setup({ board: { plansDir: dir } });
+    expect(((await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board).plansWaiting).toHaveLength(1);
+
+    await harness.behavior.runCli(["report", "ABC-102", "--stage", "done"]);
+    const board = (await harness.behavior.callRpc("board.refresh", { boardId: 1 })) as Board;
+    expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "done", planRound: { status: "withdrawn" } });
+    expect(board.plansWaiting).toEqual([]);
+  });
 });
 
 describe("import from Phase Board", () => {
