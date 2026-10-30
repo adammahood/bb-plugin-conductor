@@ -7,8 +7,8 @@ import { mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import plugin, { ASK_TOOL, LEGACY_TOOLS, REPORT_TOOL, SETUP_SKILL, SKILL } from "../server";
-import type { Board, Decision, TicketDetail } from "../src/contract";
+import plugin, { ASK_TOOL, LEGACY_TOOLS, REPORT_TOOL, SETUP_SKILL, SKILL, SUBMIT_PLAN_TOOL } from "../server";
+import type { Board, Decision, PlanMark, PlanRound, TicketDetail } from "../src/contract";
 
 const ORCH = "thr_orch";
 
@@ -19,6 +19,8 @@ interface World {
   replies: Record<string, { createdAt: number; data: Record<string, unknown> }[]>;
   /** Overrides for the first review round (ref-1, opened from the ABC-101 lead). */
   round: Record<string, unknown>;
+  /** Files on the agents' machine, by absolute path. */
+  files: Record<string, string>;
 }
 
 function thread(id: string, parentThreadId: string, title: string, extra = {}) {
@@ -61,6 +63,7 @@ async function setup(
     failSend: false,
     replies: {},
     round: {},
+    files: {},
     ...options.world,
   };
   const metadata = new Map<string, Record<string, unknown>>();
@@ -71,7 +74,12 @@ async function setup(
     agentSkillIds: [SKILL, SETUP_SKILL],
     sdk: {
       threads: {
-        get: async ({ threadId }: { threadId: string }) => ({ id: threadId, title: threadId === ORCH ? "Orchestrator" : threadId }),
+        get: async ({ threadId }: { threadId: string }) => ({
+          id: threadId,
+          title: threadId === ORCH ? "Orchestrator" : threadId,
+          environmentId: `env_${threadId}`,
+        }),
+        storageLocation: async ({ threadId }: { threadId: string }) => ({ hostId: "host_1", storageRootPath: `/storage/${threadId}` }),
         list: async ({ parentThreadId, threadIds }: { parentThreadId?: string; threadIds?: string[] } = {}) =>
           threadIds
             ? Object.values(world.children).flat().filter((t) => threadIds.includes(t.id))
@@ -102,9 +110,19 @@ async function setup(
           { id: "proj_web", name: "web-api" },
         ],
       },
+      files: {
+        read: async ({ path, rootPath }: { path: string; rootPath?: string }) => {
+          if (rootPath && !path.startsWith(`${rootPath}/`)) throw new Error("outside root");
+          if (!(path in world.files)) throw new Error(`ENOENT ${path}`);
+          const content = world.files[path]!;
+          return { content, contentEncoding: "utf8", sizeBytes: content.length, sha256: "x" };
+        },
+      },
       environments: {
         status: async () => ({ mergeBase: { aheadCount: 0 } }),
         get: async ({ environmentId }: { environmentId: string }) => ({
+          path: `/work/${environmentId}`,
+          hostId: "host_1",
           id: environmentId,
           branchName: `bb/${environmentId}`,
           mergeBaseBranch: environmentId === "env_thr_lead2" ? "origin/m4-avatars" : "origin/abc-103-api-route",
@@ -489,10 +507,110 @@ describe("review rounds", () => {
   });
 });
 
-describe("plan review fallback", () => {
-  it("waits on the user after the plan is written, and moves on when they reply", async () => {
+describe("plan review", () => {
+  const PLAN = ["# Avatars", "", "Store the original and", "resize on read.", "", "- Add a CDN purge job"].join("\n");
+  const path = "/work/env_thr_lead1/plans/abc-101.md";
+  const submit = (harness: Harness, args: Record<string, unknown> = { path }) =>
+    harness.behavior.callAgentTool(SUBMIT_PLAN_TOOL, args, { threadId: "thr_lead1" });
+  const rounds = async (harness: Harness) =>
+    ((await harness.behavior.callRpc("plans.list", { boardId: 1, key: "ABC-101" })) as { rounds: PlanRound[] }).rounds;
+
+  // The default fixture has a code review round open on this lead, which would outrank plan review.
+  const noReview = { world: { round: { userArchivedAt: 1 } } };
+
+  it("opens a round from the agent's plan file and puts it in front of the user", async () => {
+    const { harness, world } = await setup(noReview);
+    world.files[path] = PLAN;
+    expect(await submit(harness)).toBe(
+      '[conductor] Plan round 1 for ABC-101 is with the user on the Conductor board. End your turn now. The review arrives as a message that starts "[conductor] Plan round 1 for ABC-101".',
+    );
+    const board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+    expect(board.plansWaiting).toEqual([expect.objectContaining({ ticketKey: "ABC-101", n: 1, status: "open", source: "submitted" })]);
+    expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ stage: "plan-review", planRound: { n: 1, status: "open" } });
+    const [round] = await rounds(harness);
+    const got = (await harness.behavior.callRpc("plans.get", { roundId: round!.id })) as { content: string };
+    expect(got.content).toBe(PLAN);
+    expect(await harness.behavior.callRpc("plans.waiting", null)).toMatchObject({ rounds: [{ ticketKey: "ABC-101" }] });
+  });
+
+  it("refuses files outside the workspace, plans folder and thread storage", async () => {
+    const { harness, world } = await setup();
+    world.files["/home/me/notes.md"] = PLAN;
+    expect(await submit(harness, { path: "/home/me/notes.md" })).toMatchObject({ isError: true });
+    expect(await submit(harness, { path: "/work/env_thr_lead1/.env" })).toMatchObject({ isError: true });
+    world.files["/storage/thr_lead1/plan.md"] = PLAN;
+    expect(await submit(harness, { path: "/storage/thr_lead1/plan.md" })).toContain("Plan round 1");
+  });
+
+  it("sends the marks back as one message when changes are requested, then supersedes on resubmit", async () => {
+    const { harness, world, sent } = await setup(noReview);
+    world.files[path] = PLAN;
+    await submit(harness);
+    const [round] = await rounds(harness);
+    await expect(harness.behavior.callRpc("plans.decide", { roundId: round!.id, decision: "changes_requested" })).rejects.toThrow(
+      "Add a mark or an overall comment",
+    );
+    await harness.behavior.callRpc("plans.mark.save", {
+      roundId: round!.id, kind: "comment", quote: "resize on read.", startLine: 3, endLine: 4, comment: "Use a queue.",
+    });
+    const removal = (await harness.behavior.callRpc("plans.mark.save", {
+      roundId: round!.id, kind: "remove", quote: "Add a CDN purge job", startLine: 6, endLine: 6,
+    })) as PlanMark;
+    await expect(
+      harness.behavior.callRpc("plans.mark.save", { roundId: round!.id, kind: "comment", quote: "x", startLine: 40, endLine: 41, comment: "y" }),
+    ).rejects.toThrow("outside the plan");
+
+    const decided = (await harness.behavior.callRpc("plans.decide", {
+      roundId: round!.id, decision: "changes_requested", overallComment: "Smaller steps.",
+    })) as PlanRound;
+    expect(decided).toMatchObject({ status: "changes_requested", marks: 2, deliveryError: null });
+    expect(sent.at(-1)).toMatchObject({ threadId: "thr_lead1", mode: "auto", originPluginId: "conductor" });
+    expect(sent.at(-1)!.text).toContain('## 2. (line 6) Remove: "Add a CDN purge job"');
+    expect(sent.at(-1)!.text).toContain("## 3. General feedback about the plan\n> Smaller steps.");
+    await expect(harness.behavior.callRpc("plans.mark.delete", { id: removal.id })).rejects.toThrow("already changes requested");
+
+    let board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+    expect(board.tickets.find((t) => t.key === "ABC-101")!.stage).toBe("planning");
+
+    world.files[path] = `${PLAN}\n- Add a queue`;
+    await submit(harness);
+    const all = await rounds(harness);
+    expect(all.map((r) => [r.n, r.status])).toEqual([[2, "open"], [1, "changes_requested"]]);
+    const diff = (await harness.behavior.callRpc("plans.diff", { fromRoundId: all[1]!.id, toRoundId: all[0]!.id })) as { patch: string };
+    expect(diff.patch).toContain("+- Add a queue");
+
+    await harness.behavior.callRpc("plans.decide", { roundId: all[0]!.id, decision: "approved" });
+    expect(sent.at(-1)!.text).toContain("[conductor] Plan round 2 for ABC-101: approved");
+    board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+    expect(board.tickets.find((t) => t.key === "ABC-101")!.stage).toBe("building");
+    expect(board.plansWaiting).toEqual([]);
+  });
+
+  it("supersedes an open round when the agent submits again", async () => {
+    const { harness, world } = await setup();
+    world.files[path] = PLAN;
+    await submit(harness);
+    await submit(harness);
+    expect((await rounds(harness)).map((r) => r.status)).toEqual(["open", "superseded"]);
+  });
+
+  it("keeps a failed delivery for retry", async () => {
+    const { harness, world, sent } = await setup();
+    world.files[path] = PLAN;
+    await submit(harness);
+    const [round] = await rounds(harness);
+    world.failSend = true;
+    const failed = (await harness.behavior.callRpc("plans.decide", { roundId: round!.id, decision: "approved" })) as PlanRound;
+    expect(failed.deliveryError).toContain("thread is gone");
+    world.failSend = false;
+    const retried = (await harness.behavior.callRpc("plans.retryDelivery", { roundId: round!.id })) as PlanRound;
+    expect(retried.deliveredAt).not.toBeNull();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("opens a round on its own from a waiting plan in the plans folder, and closes it when the user replies in the thread", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pb-plans-"));
-    const file = join(dir, "2026-10-28-abc102-source-size-and-fps.md");
+    const file = join(dir, "2026-10-28-abc102-image-sizes.md");
     writeFileSync(file, "# plan");
     utimesSync(file, 1000, 1000);
     const { harness, world } = await setup({ board: { plansDir: dir } });
@@ -501,17 +619,21 @@ describe("plan review fallback", () => {
     expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({
       stage: "plan-review",
       stageSource: "inferred",
-      plan: { file: "2026-10-28-abc102-source-size-and-fps.md" },
+      planRound: { n: 1, source: "inferred", status: "open", path: file },
     });
 
-    // An agent's message does not close the round; the user's does.
-    world.replies.thr_lead2 = [{ createdAt: 2_000_000, data: { initiator: "agent", senderThreadId: "thr_other" } }];
+    // The same file does not open a second round; an agent's message does not close it.
+    world.replies.thr_lead2 = [{ createdAt: Date.now() + 60_000, data: { initiator: "agent", senderThreadId: "thr_other" } }];
     board = (await harness.behavior.callRpc("board.refresh", { boardId: 1 })) as Board;
-    expect(board.tickets.find((t) => t.key === "ABC-102")!.stage).toBe("plan-review");
+    expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "plan-review", planRound: { n: 1 } });
 
-    world.replies.thr_lead2.unshift({ createdAt: 2_000_001, data: { initiator: "user", senderThreadId: null, source: "tell" } });
+    world.replies.thr_lead2.unshift({ createdAt: Date.now() + 60_001, data: { initiator: "user", senderThreadId: null, source: "tell" } });
     board = (await harness.behavior.callRpc("board.refresh", { boardId: 1 })) as Board;
-    expect(board.tickets.find((t) => t.key === "ABC-102")!.stage).toBe("building");
+    expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "planning", planRound: { status: "withdrawn" } });
+
+    writeFileSync(file, "# plan, revised");
+    board = (await harness.behavior.callRpc("board.refresh", { boardId: 1 })) as Board;
+    expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "plan-review", planRound: { n: 2, status: "open" } });
   });
 });
 
@@ -583,7 +705,7 @@ describe("agent configuration", () => {
       thread: { id: "thr_impl1" },
       pluginMetadata: { boardId: 1, ticketKey: "ABC-101", role: "implementer" },
     });
-    expect(config.tools.map((t) => t.name).sort()).toEqual([ASK_TOOL, REPORT_TOOL]);
+    expect(config.tools.map((t) => t.name).sort()).toEqual([ASK_TOOL, REPORT_TOOL, SUBMIT_PLAN_TOOL]);
     expect(config.skills).toEqual([SKILL]);
     expect(config.instructions).toContain('ticket "ABC-101" as its implementer');
     expect(config.instructions).toContain("conductor_ask_decision");
@@ -595,7 +717,7 @@ describe("agent configuration", () => {
       board: { userName: "Sam", rules: { askDecisions: false, splitPrs: true }, extraRules: "Never deploy.\nAsk before merging." },
     });
     const config = await resolve(harness, { thread: { id: "thr_lead1" }, pluginMetadata: { boardId: 1, ticketKey: "ABC-101", role: "lead" } });
-    expect(config.tools.map((t) => t.name)).toEqual([REPORT_TOOL]);
+    expect(config.tools.map((t) => t.name).sort()).toEqual([REPORT_TOOL, SUBMIT_PLAN_TOOL]);
     expect(config.instructions).not.toContain("conductor_ask_decision");
     expect(config.instructions).toContain("stacked PRs by layer");
     expect(config.instructions).toContain("Rules Sam set for this board (board configuration, quoted):\n> Never deploy.\n> Ask before merging.");

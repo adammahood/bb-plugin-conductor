@@ -46,6 +46,46 @@ export const prSchema = z.object({
 });
 export type PullRequest = z.infer<typeof prSchema>;
 
+export const planRoundStatusSchema = z.enum(["open", "approved", "changes_requested", "superseded", "withdrawn"]);
+export type PlanRoundStatus = z.infer<typeof planRoundStatusSchema>;
+
+/** One submitted revision of a ticket's plan, with its outcome. */
+export const planRoundSchema = z.object({
+  id: z.number().int(),
+  boardId: z.number().int(),
+  ticketKey: z.string(),
+  threadId: z.string(),
+  n: z.number().int(),
+  path: z.string(),
+  sha256: z.string(),
+  source: z.enum(["submitted", "inferred"]),
+  status: planRoundStatusSchema,
+  summary: z.string().nullable(),
+  overallComment: z.string().nullable(),
+  marks: z.number().int(),
+  submittedAt: z.number(),
+  decidedAt: z.number().nullable(),
+  deliveredAt: z.number().nullable(),
+  deliveryError: z.string().nullable(),
+});
+export type PlanRound = z.infer<typeof planRoundSchema>;
+
+export const planMarkKindSchema = z.enum(["comment", "remove", "replace"]);
+
+/** A mark on a passage of the plan: a comment, a removal or a replacement. */
+export const planMarkSchema = z.object({
+  id: z.number().int(),
+  roundId: z.number().int(),
+  kind: planMarkKindSchema,
+  quote: z.string(),
+  startLine: z.number().int(),
+  endLine: z.number().int(),
+  comment: z.string().nullable(),
+  replacement: z.string().nullable(),
+  createdAt: z.number(),
+});
+export type PlanMark = z.infer<typeof planMarkSchema>;
+
 export const ticketSchema = z.object({
   boardId: z.number().int(),
   key: z.string(),
@@ -67,7 +107,8 @@ export const ticketSchema = z.object({
   /** Other tickets worked in the same lead thread. */
   sharedWith: z.array(z.string()),
   prs: z.array(prSchema),
-  plan: z.object({ file: z.string(), writtenAt: z.number() }).nullable(),
+  /** The ticket's latest plan round, if any. */
+  planRound: planRoundSchema.nullable(),
   reportedAt: z.number().nullable(),
   openReview: z
     .object({ targetKey: z.string(), gitRef: z.string().nullable(), state: z.enum(["needs-review", "with-agent"]) })
@@ -178,6 +219,7 @@ export const boardSchema = z.object({
   integrations: integrationsSchema,
   tickets: z.array(ticketSchema),
   reviewsWaiting: z.array(reviewSchema.extend({ ticketKey: z.string() })),
+  plansWaiting: z.array(planRoundSchema),
   nextPr: nextPrSchema.nullable(),
   lastSweepAt: z.number().nullable(),
   sweepError: z.string().nullable(),
@@ -253,6 +295,54 @@ export const rpcContract = defineRpcContract({
   "decisions.retryDelivery": { input: decisionIdInput, output: decisionSchema },
   /** Re-reads review rounds; the page calls it every few seconds while visible. */
   "reviews.poll": { input: z.null(), output: z.object({ changed: z.boolean() }) },
+  /** Open plan rounds on every board, for the inbox and the badge. */
+  "plans.waiting": { input: z.null(), output: z.object({ rounds: z.array(planRoundSchema) }) },
+  "plans.list": {
+    input: z.object({ boardId: z.number().int().positive(), key: z.string().min(1).max(40) }).strict(),
+    output: z.object({ rounds: z.array(planRoundSchema) }),
+  },
+  "plans.get": {
+    input: z.object({ roundId: z.number().int().positive() }).strict(),
+    output: z.object({ round: planRoundSchema, content: z.string(), marks: z.array(planMarkSchema) }),
+  },
+  "plans.diff": {
+    input: z.object({ fromRoundId: z.number().int().positive(), toRoundId: z.number().int().positive() }).strict(),
+    output: z.object({ patch: z.string(), path: z.string() }),
+  },
+  "plans.mark.save": {
+    input: z
+      .object({
+        roundId: z.number().int().positive(),
+        id: z.number().int().positive().optional(),
+        kind: planMarkKindSchema,
+        quote: z.string().trim().min(1).max(4000),
+        startLine: z.number().int().positive(),
+        endLine: z.number().int().positive(),
+        comment: z.string().trim().max(4000).optional(),
+        replacement: z.string().max(8000).optional(),
+      })
+      .strict(),
+    output: planMarkSchema,
+  },
+  "plans.mark.delete": {
+    input: z.object({ id: z.number().int().positive() }).strict(),
+    output: z.object({ removed: z.boolean() }),
+  },
+  "plans.comment": {
+    input: z.object({ roundId: z.number().int().positive(), comment: z.string().max(8000) }).strict(),
+    output: planRoundSchema,
+  },
+  "plans.decide": {
+    input: z
+      .object({
+        roundId: z.number().int().positive(),
+        decision: z.enum(["approved", "changes_requested"]),
+        overallComment: z.string().max(8000).optional(),
+      })
+      .strict(),
+    output: planRoundSchema,
+  },
+  "plans.retryDelivery": { input: z.object({ roundId: z.number().int().positive() }).strict(), output: planRoundSchema },
   "thread.ticket": {
     input: z.object({ threadId: z.string().min(1) }).strict(),
     output: z.object({

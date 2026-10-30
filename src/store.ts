@@ -1,5 +1,15 @@
 import type Database from "better-sqlite3";
-import type { Decision, PullRequest, Role, Stage, StageEvent, Ticket } from "./contract";
+import type {
+  Decision,
+  PlanMark,
+  PlanRound,
+  PlanRoundStatus,
+  PullRequest,
+  Role,
+  Stage,
+  StageEvent,
+  Ticket,
+} from "./contract";
 import { boardOptionsSchema, type BoardOptions } from "./options";
 
 // Append-only: bb hashes each statement and rejects edits to shipped ones.
@@ -69,6 +79,37 @@ export const MIGRATIONS = [
     note TEXT,
     thread_id TEXT,
     at INTEGER NOT NULL
+  )`,
+  // Plan review: each round keeps its own copy of the plan, so history and diffs survive edits to the file.
+  `CREATE TABLE plan_rounds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    board_id INTEGER NOT NULL,
+    ticket_key TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    content TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    summary TEXT,
+    overall_comment TEXT,
+    submitted_at INTEGER NOT NULL,
+    decided_at INTEGER,
+    delivered_at INTEGER,
+    delivery_error TEXT
+  )`,
+  `CREATE TABLE plan_marks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    round_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    quote TEXT NOT NULL,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL,
+    comment TEXT,
+    replacement TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
   )`,
 ];
 
@@ -222,7 +263,8 @@ export class Store {
   /** Drops a board and everything on it; threads and their work are untouched. */
   removeBoard(id: number): boolean {
     return this.db.transaction(() => {
-      for (const table of ["tickets", "thread_tickets", "decisions", "stage_events"]) {
+      this.db.prepare(`DELETE FROM plan_marks WHERE round_id IN (SELECT id FROM plan_rounds WHERE board_id = ?)`).run(id);
+      for (const table of ["tickets", "thread_tickets", "decisions", "stage_events", "plan_rounds"]) {
         this.db.prepare(`DELETE FROM ${table} WHERE board_id = ?`).run(id);
       }
       return this.db.prepare(`DELETE FROM boards WHERE id = ?`).run(id).changes === 1;
@@ -301,6 +343,97 @@ export class Store {
         .prepare(`INSERT OR REPLACE INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`)
         .run(...columns.map((c) => row[c] as string | number | null));
     }
+  }
+
+  getRound(id: number): (PlanRound & { content: string }) | null {
+    const row = this.db.prepare(`SELECT * FROM plan_rounds WHERE id = ?`).get(id) as PlanRoundRow | undefined;
+    return row ? { ...this.toRound(row), content: row.content } : null;
+  }
+
+  /** Open plan rounds, on one board or all of them. */
+  waitingRounds(boardId?: number): PlanRound[] {
+    const rows = (
+      boardId === undefined
+        ? this.db.prepare(`SELECT * FROM plan_rounds WHERE status = 'open' ORDER BY submitted_at`).all()
+        : this.db.prepare(`SELECT * FROM plan_rounds WHERE status = 'open' AND board_id = ? ORDER BY submitted_at`).all(boardId)
+    ) as PlanRoundRow[];
+    return rows.map((row) => this.toRound(row));
+  }
+
+  marks(roundId: number): PlanMark[] {
+    return (
+      this.db.prepare(`SELECT * FROM plan_marks WHERE round_id = ? ORDER BY start_line, id`).all(roundId) as PlanMarkRow[]
+    ).map(toMark);
+  }
+
+  saveMark(input: Omit<PlanMark, "id" | "createdAt"> & { id?: number }): PlanMark {
+    const at = this.now();
+    if (input.id !== undefined) {
+      this.db
+        .prepare(
+          `UPDATE plan_marks SET kind = ?, quote = ?, start_line = ?, end_line = ?, comment = ?, replacement = ?, updated_at = ?
+           WHERE id = ? AND round_id = ?`,
+        )
+        .run(input.kind, input.quote, input.startLine, input.endLine, input.comment, input.replacement, at, input.id, input.roundId);
+      return toMark(this.db.prepare(`SELECT * FROM plan_marks WHERE id = ?`).get(input.id) as PlanMarkRow);
+    }
+    const result = this.db
+      .prepare(
+        `INSERT INTO plan_marks (round_id, kind, quote, start_line, end_line, comment, replacement, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(input.roundId, input.kind, input.quote, input.startLine, input.endLine, input.comment, input.replacement, at, at);
+    return toMark(this.db.prepare(`SELECT * FROM plan_marks WHERE id = ?`).get(Number(result.lastInsertRowid)) as PlanMarkRow);
+  }
+
+  markRoundId(markId: number): number | null {
+    const row = this.db.prepare(`SELECT round_id FROM plan_marks WHERE id = ?`).get(markId) as { round_id: number } | undefined;
+    return row?.round_id ?? null;
+  }
+
+  deleteMark(markId: number): boolean {
+    return this.db.prepare(`DELETE FROM plan_marks WHERE id = ?`).run(markId).changes === 1;
+  }
+
+  setOverallComment(roundId: number, comment: string | null): void {
+    this.db.prepare(`UPDATE plan_rounds SET overall_comment = ? WHERE id = ?`).run(comment, roundId);
+  }
+
+  /** Moves an open round to a final status; null when it was not open. */
+  closeRound(roundId: number, status: Exclude<PlanRoundStatus, "open">): PlanRound | null {
+    const result = this.db
+      .prepare(`UPDATE plan_rounds SET status = ?, decided_at = ? WHERE id = ? AND status = 'open'`)
+      .run(status, this.now(), roundId);
+    return result.changes === 1 ? this.getRound(roundId) : null;
+  }
+
+  markRoundDelivery(roundId: number, error: string | null): PlanRound {
+    this.db
+      .prepare(`UPDATE plan_rounds SET delivered_at = ?, delivery_error = ? WHERE id = ?`)
+      .run(error === null ? this.now() : null, error, roundId);
+    return this.getRound(roundId)!;
+  }
+
+  toRound(row: PlanRoundRow): PlanRound {
+    const marks = this.db.prepare(`SELECT COUNT(*) AS n FROM plan_marks WHERE round_id = ?`).get(row.id) as { n: number };
+    return {
+      id: row.id,
+      boardId: row.board_id,
+      ticketKey: row.ticket_key,
+      threadId: row.thread_id,
+      n: row.n,
+      path: row.path,
+      sha256: row.sha256,
+      source: row.source,
+      status: row.status,
+      summary: row.summary,
+      overallComment: row.overall_comment,
+      marks: marks.n,
+      submittedAt: row.submitted_at,
+      decidedAt: row.decided_at,
+      deliveredAt: row.delivered_at,
+      deliveryError: row.delivery_error,
+    };
   }
 
   transaction<T>(fn: () => T): T {
@@ -526,6 +659,45 @@ export class BoardStore {
     return this.root.listDecisions({ ...filter, boardId: this.boardId });
   }
 
+  /** A ticket's plan rounds, newest first. */
+  planRounds(ticketKey: string): PlanRound[] {
+    return (
+      this.db
+        .prepare(`SELECT * FROM plan_rounds WHERE board_id = ? AND ticket_key = ? ORDER BY n DESC`)
+        .all(this.boardId, ticketKey) as PlanRoundRow[]
+    ).map((row) => this.root.toRound(row));
+  }
+
+  /** Opens the next round for a ticket; an open round before it is superseded. */
+  openRound(input: {
+    ticketKey: string;
+    threadId: string;
+    path: string;
+    content: string;
+    sha256: string;
+    source: PlanRound["source"];
+    summary: string | null;
+  }): PlanRound {
+    return this.db.transaction(() => {
+      const at = this.now();
+      this.db
+        .prepare(
+          `UPDATE plan_rounds SET status = 'superseded', decided_at = ? WHERE board_id = ? AND ticket_key = ? AND status = 'open'`,
+        )
+        .run(at, this.boardId, input.ticketKey);
+      const last = this.db
+        .prepare(`SELECT COALESCE(MAX(n), 0) AS n FROM plan_rounds WHERE board_id = ? AND ticket_key = ?`)
+        .get(this.boardId, input.ticketKey) as { n: number };
+      const result = this.db
+        .prepare(
+          `INSERT INTO plan_rounds (board_id, ticket_key, thread_id, n, path, content, sha256, source, summary, submitted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(this.boardId, input.ticketKey, input.threadId, last.n + 1, input.path, input.content, input.sha256, input.source, input.summary, at);
+      return this.root.getRound(Number(result.lastInsertRowid))!;
+    })();
+  }
+
   private toTicket(row: TicketRow): Ticket {
     const counts = this.db
       .prepare(
@@ -566,13 +738,58 @@ export class BoardStore {
       stageNote: row.stage_note,
       sharedWith,
       prs: (JSON.parse(row.prs_json) as Partial<PullRequest>[]).map(normalizePr),
-      plan: null,
+      planRound: this.planRounds(row.key)[0] ?? null,
       openReview: null,
       openDecisions: counts.open,
       blockingDecisions: counts.blocking,
       updatedAt: row.updated_at,
     };
   }
+}
+
+interface PlanRoundRow {
+  id: number;
+  board_id: number;
+  ticket_key: string;
+  thread_id: string;
+  n: number;
+  path: string;
+  content: string;
+  sha256: string;
+  source: PlanRound["source"];
+  status: PlanRoundStatus;
+  summary: string | null;
+  overall_comment: string | null;
+  submitted_at: number;
+  decided_at: number | null;
+  delivered_at: number | null;
+  delivery_error: string | null;
+}
+
+interface PlanMarkRow {
+  id: number;
+  round_id: number;
+  kind: PlanMark["kind"];
+  quote: string;
+  start_line: number;
+  end_line: number;
+  comment: string | null;
+  replacement: string | null;
+  created_at: number;
+}
+
+function toMark(row: PlanMarkRow): PlanMark {
+  return {
+    id: row.id,
+    roundId: row.round_id,
+    kind: row.kind,
+    quote: row.quote,
+    startLine: row.start_line,
+    endLine: row.end_line,
+    comment: row.comment,
+    replacement: row.replacement,
+    createdAt: row.created_at,
+  };
 }
 
 function toBoard(row: BoardRow): BoardRecord {

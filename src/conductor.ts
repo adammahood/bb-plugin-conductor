@@ -1,9 +1,21 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { BoardEngine, NotTicketThreadError } from "./board";
-import { CHANGED, type BoardSummary, type Decision, type Integrations, type PullRequest, type Role, type Stage, type Ticket } from "./contract";
+import {
+  CHANGED,
+  type BoardSummary,
+  type Decision,
+  type Integrations,
+  type PlanMark,
+  type PlanRound,
+  type PullRequest,
+  type Role,
+  type Stage,
+  type Ticket,
+} from "./contract";
 import { deliver } from "./decisions";
 import { applyOptionsPatch, boardOptionsSchema, DEFAULT_TICKET_PATTERN, type BoardOptionsPatch } from "./options";
+import { planDiff, planFeedbackMessage } from "./plans";
 import type { NewDecision, Store, TableName } from "./store";
 
 /** Plugin ids of the optional peers the board reads from. */
@@ -216,6 +228,123 @@ export class Conductor {
 
   private userName(boardId: number): string {
     return this.store.getBoard(boardId)?.options.userName ?? "the user";
+  }
+
+  async submitPlan(
+    threadId: string,
+    input: { path: string; ticket: string | null; summary: string | null },
+  ): Promise<{ round: PlanRound; userName: string }> {
+    const engine = await this.engineFor(threadId);
+    const { round } = await engine.submitPlan(threadId, input);
+    return { round, userName: engine.store.record().options.userName };
+  }
+
+  plansWaiting(): PlanRound[] {
+    return this.store.waitingRounds();
+  }
+
+  planRounds(boardId: number, key: string): PlanRound[] {
+    return this.engine(boardId).store.planRounds(key);
+  }
+
+  planRound(roundId: number): { round: PlanRound; content: string; marks: PlanMark[] } {
+    const found = this.store.getRound(roundId);
+    if (!found) throw new Error(`No plan round ${roundId}.`);
+    const { content, ...round } = found;
+    return { round, content, marks: this.store.marks(roundId) };
+  }
+
+  planDiff(fromRoundId: number, toRoundId: number): { patch: string; path: string } {
+    const from = this.store.getRound(fromRoundId);
+    const to = this.store.getRound(toRoundId);
+    if (!from || !to || from.boardId !== to.boardId || from.ticketKey !== to.ticketKey) {
+      throw new Error("Both rounds must belong to the same ticket.");
+    }
+    const name = to.path.split("/").at(-1) ?? "plan.md";
+    return { patch: planDiff(from.content, to.content, name), path: name };
+  }
+
+  private openRound(roundId: number) {
+    const round = this.store.getRound(roundId);
+    if (!round) throw new Error(`No plan round ${roundId}.`);
+    if (round.status !== "open") throw new Error(`Plan round ${round.n} for ${round.ticketKey} is already ${round.status.replace("_", " ")}.`);
+    return round;
+  }
+
+  saveMark(input: Omit<PlanMark, "id" | "createdAt" | "comment" | "replacement"> & {
+    id?: number;
+    comment?: string;
+    replacement?: string;
+  }): PlanMark {
+    const round = this.openRound(input.roundId);
+    const lines = round.content.split("\n").length;
+    if (input.startLine > input.endLine || input.endLine > lines) throw new Error("The mark's lines are outside the plan.");
+    if (input.kind === "replace" && input.replacement === undefined) throw new Error("A replacement needs its new text.");
+    if (input.kind === "comment" && !input.comment) throw new Error("A comment needs some text.");
+    if (input.id !== undefined && this.store.markRoundId(input.id) !== input.roundId) throw new Error(`No mark ${input.id} on this round.`);
+    const mark = this.store.saveMark({
+      ...input,
+      comment: input.comment || null,
+      replacement: input.kind === "replace" ? (input.replacement ?? "") : null,
+    });
+    this.changed();
+    return mark;
+  }
+
+  deleteMark(markId: number): boolean {
+    const roundId = this.store.markRoundId(markId);
+    if (roundId === null) return false;
+    this.openRound(roundId);
+    const removed = this.store.deleteMark(markId);
+    this.changed();
+    return removed;
+  }
+
+  setPlanComment(roundId: number, comment: string): PlanRound {
+    this.openRound(roundId);
+    this.store.setOverallComment(roundId, comment.trim() || null);
+    return this.planRound(roundId).round;
+  }
+
+  /** Approves (notes allowed) or requests changes, then sends the marks to the agent. */
+  async decidePlan(roundId: number, decision: "approved" | "changes_requested", overallComment?: string): Promise<PlanRound> {
+    const round = this.openRound(roundId);
+    if (overallComment !== undefined) this.store.setOverallComment(roundId, overallComment.trim() || null);
+    const overall = overallComment !== undefined ? overallComment.trim() : (round.overallComment ?? "");
+    if (decision === "changes_requested" && this.store.marks(roundId).length === 0 && overall === "") {
+      throw new Error("Add a mark or an overall comment to request changes.");
+    }
+    const closed = this.store.closeRound(roundId, decision);
+    if (!closed) throw new Error(`Plan round ${round.n} was decided elsewhere.`);
+    this.changed();
+    const delivered = await this.deliverPlan(roundId);
+    this.changed();
+    return delivered;
+  }
+
+  async retryPlanDelivery(roundId: number): Promise<PlanRound> {
+    const round = this.planRound(roundId).round;
+    if (round.status !== "approved" && round.status !== "changes_requested") throw new Error("Only a decided round is sent.");
+    if (round.deliveredAt !== null) return round;
+    const delivered = await this.deliverPlan(roundId);
+    this.changed();
+    return delivered;
+  }
+
+  private async deliverPlan(roundId: number): Promise<PlanRound> {
+    const { round, marks } = this.planRound(roundId);
+    try {
+      await this.bb.sdk.threads.send({
+        threadId: round.threadId,
+        mode: "auto",
+        originPluginId: this.bb.pluginId,
+        input: [{ type: "text", text: planFeedbackMessage(round, marks), mentions: [] }],
+      });
+      return this.store.markRoundDelivery(roundId, null);
+    } catch (error) {
+      this.bb.log.warn(`deliver plan round ${roundId}: ${String(error)}`);
+      return this.store.markRoundDelivery(roundId, String(error).slice(0, 500));
+    }
   }
 
   /** Re-reads review rounds on every board; tells open pages only when one moved. */

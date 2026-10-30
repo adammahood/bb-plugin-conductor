@@ -17,8 +17,7 @@ const facts = (overrides: Partial<StageFacts> = {}): StageFacts => ({
   prs: [],
   reviewRound: null,
   reportedAfterReview: false,
-  planWaiting: false,
-  planClosed: false,
+  planRound: null,
   agentRunning: false,
   ...overrides,
 });
@@ -30,7 +29,7 @@ describe("decideStage", () => {
 
   it("is building while an agent runs or once the plan round closed", () => {
     expect(decideStage(facts({ agentRunning: true })).stage).toBe("building");
-    expect(decideStage(facts({ planClosed: true })).stage).toBe("building");
+    expect(decideStage(facts({ planRound: "approved" })).stage).toBe("building");
   });
 
   it("reads PR states: drafts, then open for review, then all merged", () => {
@@ -45,12 +44,22 @@ describe("decideStage", () => {
     expect(decideStage(facts({ prs: [local] })).stage).toBe("building");
   });
 
-  it("shows plan review from the fallback signal", () => {
-    expect(decideStage(facts({ planWaiting: true }))).toMatchObject({ stage: "plan-review", source: "inferred" });
+  it("shows plan review while a plan round waits on the user", () => {
+    expect(decideStage(facts({ planRound: "open" }))).toMatchObject({ stage: "plan-review", source: "inferred" });
+    expect(decideStage(facts({ planRound: "open", reported: "building" })).stage).toBe("plan-review");
+  });
+
+  it("goes back to planning when changes are requested, and to building once approved", () => {
+    expect(decideStage(facts({ planRound: "changes_requested", reported: "plan-review" }))).toMatchObject({
+      stage: "planning",
+      source: "inferred",
+    });
+    expect(decideStage(facts({ planRound: "approved", reported: "plan-review" })).stage).toBe("building");
+    expect(decideStage(facts({ planRound: "approved" })).stage).toBe("building");
   });
 
   it("puts an open review round above everything but paused", () => {
-    const withPrs = facts({ prs: [pr(50, "open")], reviewRound: "needs-review", planWaiting: true });
+    const withPrs = facts({ prs: [pr(50, "open")], reviewRound: "needs-review", planRound: "open" });
     expect(decideStage(withPrs).stage).toBe("code-review");
     expect(decideStage({ ...withPrs, reported: "in-milestone" }).stage).toBe("code-review");
     expect(decideStage({ ...withPrs, reported: "paused" }).stage).toBe("paused");
@@ -69,7 +78,7 @@ describe("decideStage", () => {
       stage: "building",
       source: "reported",
     });
-    expect(decideStage(facts({ reported: "building", planWaiting: true })).stage).toBe("building");
+    expect(decideStage(facts({ reported: "building", planRound: "approved" })).stage).toBe("building");
   });
 
   it("moves past a building report once a PR is open or everything is merged", () => {
@@ -85,8 +94,8 @@ describe("decideStage", () => {
     expect(decideStage({ ...withAgent, reported: "paused" }).stage).toBe("paused");
   });
 
-  it("ends a reported plan review when the plan round closes", () => {
-    expect(decideStage(facts({ reported: "plan-review", planClosed: true })).stage).toBe("building");
+  it("ends a reported plan review when its round is decided", () => {
+    expect(decideStage(facts({ reported: "plan-review", planRound: "approved" })).stage).toBe("building");
   });
 });
 

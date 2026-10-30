@@ -15,6 +15,7 @@ import {
   type Ticket,
 } from "./src/contract";
 import { askedNotice } from "./src/decisions";
+import { planPrefix } from "./src/plans";
 import { agentInstructions, RULE_IDS, type BoardOptionsPatch } from "./src/options";
 import { MIGRATIONS, Store } from "./src/store";
 
@@ -22,6 +23,7 @@ export { rpcContract };
 
 export const ASK_TOOL = "conductor_ask_decision";
 export const REPORT_TOOL = "conductor_report_stage";
+export const SUBMIT_PLAN_TOOL = "conductor_submit_plan";
 /** Phase Board's tool names, kept so agents started before the rename keep working until they restart. */
 export const LEGACY_TOOLS = { ask: "pb_ask_decision", report: "pb_report_stage" } as const;
 export const SKILL = "conductor";
@@ -63,6 +65,12 @@ const reportParameters = z.object({
   note: z.string().trim().max(500).optional(),
   milestone: z.string().trim().max(40).optional(),
   prs: z.array(prInput).max(12).optional(),
+});
+
+const submitPlanParameters = z.object({
+  path: z.string().trim().min(1).max(1000),
+  ticket: z.string().trim().max(40).optional(),
+  summary: z.string().trim().max(500).optional(),
 });
 
 const metadataSchema = z.object({ boardId: z.number().int(), ticketKey: z.string(), role: roleSchema });
@@ -189,6 +197,15 @@ export default async function plugin(bb: BbPluginApi) {
     "reviews.poll": async () => ({ changed: await conductor.pollReviews() }),
     "thread.ticket": ({ threadId }) => conductor.threadView(threadId),
     "orchestrators.list": () => ({ boards: conductor.orchestrators() }),
+    "plans.waiting": () => ({ rounds: conductor.plansWaiting() }),
+    "plans.list": ({ boardId, key }) => ({ rounds: conductor.planRounds(boardId, key) }),
+    "plans.get": ({ roundId }) => conductor.planRound(roundId),
+    "plans.diff": ({ fromRoundId, toRoundId }) => conductor.planDiff(fromRoundId, toRoundId),
+    "plans.mark.save": (input) => conductor.saveMark(input),
+    "plans.mark.delete": ({ id }) => ({ removed: conductor.deleteMark(id) }),
+    "plans.comment": ({ roundId, comment }) => conductor.setPlanComment(roundId, comment),
+    "plans.decide": ({ roundId, decision, overallComment }) => conductor.decidePlan(roundId, decision, overallComment),
+    "plans.retryDelivery": ({ roundId }) => conductor.retryPlanDelivery(roundId),
     "import.phaseBoard": () => conductor.importPhaseBoard(),
   });
 
@@ -246,6 +263,31 @@ export default async function plugin(bb: BbPluginApi) {
     },
   };
 
+  bb.agents.registerTool({
+    name: SUBMIT_PLAN_TOOL,
+    description:
+      "Send your plan file to the user's Conductor board for review. They read it rendered, mark it up and approve it or request changes; the result comes back to this thread as a message.",
+    instructions:
+      "Pass the plan's absolute path. It must be a Markdown or text file in your workspace, the board's plans folder or your thread's storage folder. After changes are requested, revise the same file and submit it again.",
+    presentation: {
+      label: { pending: "Sending the plan for review", completed: "Sent the plan for review" },
+      icon: { glyph: "FileText" },
+    },
+    parameters: submitPlanParameters,
+    async execute(args, { threadId }) {
+      try {
+        const { round, userName } = await conductor.submitPlan(threadId, {
+          path: args.path,
+          ticket: args.ticket || null,
+          summary: args.summary || null,
+        });
+        return `${planPrefix(round)} is with ${userName} on the Conductor board. End your turn now. The review arrives as a message that starts "${planPrefix(round)}".`;
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  });
+
   bb.agents.registerTool({ name: ASK_TOOL, ...askTool });
   bb.agents.registerTool({ name: REPORT_TOOL, ...reportTool });
   // Never offered to new sessions (configure leaves them out); they only answer calls from older ones.
@@ -259,7 +301,7 @@ export default async function plugin(bb: BbPluginApi) {
     const board = meta.success ? store.getBoard(meta.data.boardId) : null;
     if (!meta.success || isSideChat || !board) return { tools: [], skills: [SETUP_SKILL] };
     return {
-      tools: [...(board.options.rules.askDecisions ? [ASK_TOOL] : []), REPORT_TOOL],
+      tools: [...(board.options.rules.askDecisions ? [ASK_TOOL] : []), REPORT_TOOL, SUBMIT_PLAN_TOOL],
       skills: [SKILL],
       instructions: agentInstructions(board, { key: meta.data.ticketKey, role: meta.data.role }, { codeReview: conductor.integrationsNow().codeReview }),
     };

@@ -116,9 +116,9 @@ export const RULES: RuleText[] = [
   {
     id: "planRounds",
     title: "Plan rounds",
-    summary: "Agents share a plan, report plan-review and wait for your approval before building.",
+    summary: "Agents write their plan to a file and send it to the board; you mark it up and approve it before they build.",
     text: (user) =>
-      `Before writing code, share your plan in your reply, report the stage plan-review and end your turn. ${user} replies in your thread; a reply with no change requests approves the plan. Then report building and start.`,
+      `Before writing code, write your plan to a Markdown file and send it with conductor_submit_plan, then end your turn. ${user} marks it up on the board and approves it or requests changes. On changes, revise the same file and submit it again; once approved, report building and start.`,
   },
   {
     id: "onePrAtATime",

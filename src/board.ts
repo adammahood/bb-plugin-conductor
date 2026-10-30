@@ -1,4 +1,5 @@
-import { readdir, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
@@ -8,6 +9,7 @@ import {
   type Decision,
   type Integrations,
   type NextPr,
+  type PlanRound,
   type PullRequest,
   type Review,
   type Role,
@@ -18,6 +20,7 @@ import {
 import { discoverTickets } from "./discovery";
 import { compileRegex, DEFAULT_TICKET_PATTERN, milestoneFor, type BoardOptions } from "./options";
 import { linearIssue, linearResolve, reviewsForThreads } from "./peers";
+import { checkPlanPath, PLAN_MAX_BYTES } from "./plans";
 import { decideStage } from "./stages";
 import type { BoardStore, NewDecision } from "./store";
 
@@ -37,20 +40,12 @@ interface EngineConfig {
   options: BoardOptions;
 }
 
-interface PlanFact {
-  file: string;
-  writtenAt: number;
-  waiting: boolean;
-  closed: boolean;
-}
-
 type WaitingReview = Review & { ticketKey: string };
 
 /** Facts gathered from bb and other plugins; refreshed by sweeps and thread events. */
 interface Facts {
   statuses: Map<string, string>;
   reviews: WaitingReview[];
-  plans: Map<string, PlanFact>;
 }
 
 const isRunning = (status: string | undefined) =>
@@ -59,7 +54,7 @@ const isRunning = (status: string | undefined) =>
 /** One board: discovery, facts and stages for the threads under its orchestrator. */
 export class BoardEngine {
   private sweeping: Promise<void> | null = null;
-  private facts: Facts = { statuses: new Map(), reviews: [], plans: new Map() };
+  private facts: Facts = { statuses: new Map(), reviews: [] };
   private reviewsReadAt = 0;
 
   constructor(
@@ -127,7 +122,7 @@ export class BoardEngine {
     }
     this.facts.statuses = statuses;
     await this.refreshReviews(ids);
-    this.facts.plans = await this.planFacts(this.store.listTickets());
+    await this.inferPlanRounds(this.store.listTickets());
   }
 
   /**
@@ -171,20 +166,20 @@ export class BoardEngine {
   }
 
   /**
-   * The plan-review fallback for leads that do not report it: a plan file for
-   * the ticket, no PRs and no commits past the base, the lead idle, and no
-   * message from the user (or the orchestrator relaying them) since the file
-   * was written. That reply closes the round; plan files carry no approval mark.
+   * The plans-folder fallback for agents that do not submit their plan: a
+   * `<date>-<key>-<slug>.md` file, no PRs and no commits past the base, and
+   * the lead idle opens a round from the file. A changed file opens the next
+   * round; a reply in the lead thread closes an open inferred round, since the
+   * user answered there instead.
    */
-  private async planFacts(tickets: Ticket[]): Promise<Map<string, PlanFact>> {
-    const out = new Map<string, PlanFact>();
+  private async inferPlanRounds(tickets: Ticket[]): Promise<void> {
     const dir = this.config().plansDir;
-    if (!dir) return out;
+    if (!dir) return;
     let files: string[];
     try {
       files = (await readdir(dir)).filter((name) => name.endsWith(".md"));
     } catch {
-      return out;
+      return;
     }
     for (const ticket of tickets) {
       if (ticket.prs.length > 0) continue;
@@ -192,17 +187,72 @@ export class BoardEngine {
       const file = files.filter((name) => name.includes(tag)).sort().at(-1);
       if (!file) continue;
       try {
-        const writtenAt = (await stat(join(dir, file))).mtimeMs;
-        const repliedAt = await this.lastReplyAt(ticket.leadThreadId);
-        const closed = repliedAt !== null && repliedAt > writtenAt;
-        const idle = !isRunning(this.facts.statuses.get(ticket.leadThreadId));
-        const waiting = !closed && idle && (await this.noCommits(ticket.environmentId));
-        out.set(ticket.key, { file, writtenAt, waiting, closed });
+        const latest = this.store.planRounds(ticket.key)[0] ?? null;
+        if (latest?.status === "open" && latest.source === "inferred") {
+          const repliedAt = await this.lastReplyAt(ticket.leadThreadId);
+          if (repliedAt !== null && repliedAt > latest.submittedAt) this.store.root.closeRound(latest.id, "withdrawn");
+        }
+        if (isRunning(this.facts.statuses.get(ticket.leadThreadId))) continue;
+        const content = await readFile(join(dir, file), "utf8");
+        const sha256 = createHash("sha256").update(content).digest("hex");
+        if (latest?.sha256 === sha256) continue;
+        if (!(await this.noCommits(ticket.environmentId))) continue;
+        this.store.openRound({
+          ticketKey: ticket.key,
+          threadId: ticket.leadThreadId,
+          path: join(dir, file),
+          content,
+          sha256,
+          source: "inferred",
+          summary: null,
+        });
       } catch (error) {
-        this.bb.log.warn(`plan facts ${ticket.key}: ${String(error)}`);
+        this.bb.log.warn(`plan round ${ticket.key}: ${String(error)}`);
       }
     }
-    return out;
+  }
+
+  /**
+   * Opens a plan round from a file the agent names. The file must be in the
+   * agent's workspace, the board's plans folder or the thread's storage; it is
+   * read on the agent's own machine, confined to that folder.
+   */
+  async submitPlan(
+    threadId: string,
+    input: { path: string; ticket: string | null; summary: string | null },
+  ): Promise<{ round: PlanRound; ticket: Ticket }> {
+    const ticketKey = await this.ticketFor(threadId, input.ticket);
+    const thread = await this.bb.sdk.threads.get({ threadId });
+    const environmentId = (thread as { environmentId?: string | null }).environmentId ?? null;
+    const environment = environmentId
+      ? await this.bb.sdk.environments.get({ environmentId }).catch(() => null)
+      : null;
+    const storage = await this.bb.sdk.threads.storageLocation({ threadId }).catch(() => null);
+    const plansDir = this.config().plansDir;
+    const checked = checkPlanPath(input.path, [environment?.path, storage?.storageRootPath, plansDir]);
+    if (!checked.ok) throw new Error(checked.reason);
+    const hostId =
+      checked.root === plansDir
+        ? undefined
+        : checked.root === storage?.storageRootPath
+          ? storage.hostId
+          : (environment?.hostId ?? undefined);
+    const file = await this.bb.sdk.files.read({ path: checked.path, rootPath: checked.root, hostId });
+    const { content: raw, contentEncoding, sizeBytes } = file as { content: string; contentEncoding?: string; sizeBytes?: number };
+    if ((sizeBytes ?? raw.length) > PLAN_MAX_BYTES) throw new Error("The plan is larger than 1 MB.");
+    const content = contentEncoding === "base64" ? Buffer.from(raw, "base64").toString("utf8") : raw;
+    const round = this.store.openRound({
+      ticketKey,
+      threadId,
+      path: checked.path,
+      content,
+      sha256: createHash("sha256").update(content).digest("hex"),
+      source: "submitted",
+      summary: input.summary,
+    });
+    this.store.reportStage({ ticketKey, threadId, stage: "plan-review", note: input.summary, prs: null, milestone: null });
+    this.changed();
+    return { round, ticket: this.withStage(this.store.getTicket(ticketKey)!) };
   }
 
   private async lastReplyAt(threadId: string): Promise<number | null> {
@@ -239,14 +289,14 @@ export class BoardEngine {
     this.facts.statuses.set(threadId, status);
     if (!isRunning(status)) {
       const leading = this.store.listTickets().filter((t) => t.leadThreadId === threadId);
-    if (leading.length === 0 && this.store.threadTickets(threadId).length === 0) return;
-      for (const [key, fact] of await this.planFacts(leading)) this.facts.plans.set(key, fact);
+      if (leading.length > 0) await this.inferPlanRounds(leading);
     }
     this.changed();
   }
 
   private withStage(ticket: Ticket): Ticket {
-    const plan = this.facts.plans.get(ticket.key) ?? null;
+    const plan = ticket.planRound;
+    const planRound = plan && ["open", "approved", "changes_requested"].includes(plan.status) ? plan.status : null;
     // A round waiting on the user outranks one already with the agent.
     const rounds = this.facts.reviews.filter((r) => r.ticketKey === ticket.key);
     const review = rounds.find((r) => r.state === "needs-review") ?? rounds[0] ?? null;
@@ -258,8 +308,7 @@ export class BoardEngine {
       prs: ticket.prs,
       reviewRound: review ? (review.state as "needs-review" | "with-agent") : null,
       reportedAfterReview: (ticket.reportedAt ?? 0) > (review?.sentAt ?? Infinity),
-      planWaiting: plan?.waiting ?? false,
-      planClosed: plan?.closed ?? false,
+      planRound: planRound as "open" | "approved" | "changes_requested" | null,
       agentRunning: running,
     });
     return {
@@ -267,7 +316,6 @@ export class BoardEngine {
       milestone: ticket.milestone ?? milestoneFor(this.config().options, ticket.base),
       stage: decision.stage,
       stageSource: decision.source,
-      plan: plan ? { file: plan.file, writtenAt: plan.writtenAt } : null,
       openReview: review
         ? { targetKey: review.targetKey, gitRef: review.gitRef, state: review.state as "needs-review" | "with-agent" }
         : null,
@@ -294,6 +342,7 @@ export class BoardEngine {
       integrations: this.integrations(),
       tickets,
       reviewsWaiting: this.facts.reviews.filter((r) => r.state === "needs-review"),
+      plansWaiting: this.store.root.waitingRounds(this.boardId),
       nextPr: record.options.rules.onePrAtATime ? nextPrToOpen(tickets) : null,
       lastSweepAt: record.lastSweepAt,
       sweepError: record.sweepError,
@@ -395,8 +444,6 @@ export class BoardEngine {
     this.store.reportStage({ ...input, ticketKey, threadId });
     await this.refreshReviews();
     const ticket = this.store.getTicket(ticketKey)!;
-    this.facts.plans.delete(ticketKey);
-    for (const [key, fact] of await this.planFacts([ticket])) this.facts.plans.set(key, fact);
     this.changed();
     return this.withStage(ticket);
   }
