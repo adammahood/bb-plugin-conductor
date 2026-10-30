@@ -1,7 +1,16 @@
 import type { ReactNode } from "react";
 import type { PluginNavPanelProps } from "@get-bb/plugin-sdk/app";
 import { cn } from "@/lib/utils";
-import { STAGE_LABELS, parseRoute, routeBoardId, useBoard, useBoards, useGo, useOpenDecisions } from "./hooks";
+import {
+  STAGE_LABELS,
+  parseRoute,
+  routeBoardId,
+  useBoard,
+  useBoards,
+  useGo,
+  useOpenDecisions,
+  usePlansWaiting,
+} from "./hooks";
 
 /** Replaces the thread list while Conductor is open: boards, the inbox, then this board's tickets. */
 export function BoardSidebar({ subPath }: PluginNavPanelProps) {
@@ -11,6 +20,7 @@ export function BoardSidebar({ subPath }: PluginNavPanelProps) {
   const boardId = routeBoardId(route, boards);
   const board = useBoard(boardId);
   const open = useOpenDecisions().data?.decisions ?? [];
+  const plans = usePlansWaiting().data?.rounds ?? [];
   const tickets = board.data?.tickets ?? [];
   const currentKey = route.kind === "ticket" ? route.key : null;
   const boardName = (id: number) => boards.find((b) => b.id === id)?.name ?? `Board ${id}`;
@@ -30,8 +40,22 @@ export function BoardSidebar({ subPath }: PluginNavPanelProps) {
           <span className="text-muted-foreground">New board</span>
         </Row>
       </Group>
-      <Group title={`Inbox (${open.length})`}>
-        {open.length === 0 && <p className="px-2 text-xs text-muted-foreground">Nothing waiting.</p>}
+      <Group title={`Inbox (${open.length + plans.length})`}>
+        {open.length + plans.length === 0 && <p className="px-2 text-xs text-muted-foreground">Nothing waiting.</p>}
+        {plans.map((r) => (
+          <Row
+            key={`plan-${r.id}`}
+            active={route.kind === "plan" && route.key === r.ticketKey}
+            onClick={() => go.plan(r.boardId, r.ticketKey, r.n)}
+          >
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span className="size-1.5 rounded-full bg-amber-500" />
+              Plan · {r.ticketKey}
+              {boards.length > 1 && ` · ${boardName(r.boardId)}`}
+            </span>
+            <span>Review plan round {r.n}</span>
+          </Row>
+        ))}
         {open.map((d) => (
           <Row key={d.id} active={false} onClick={() => go.ticket(d.boardId, d.ticketKey)}>
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">

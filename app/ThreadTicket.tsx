@@ -6,7 +6,7 @@ import {
   type ExperimentalThreadInfoProps,
   type PluginThreadHeaderActionProps,
 } from "@get-bb/plugin-sdk/app";
-import { STAGE_LABELS, useOpenTicket, useThreadTicket } from "./hooks";
+import { STAGE_LABELS, useGo, useOpenTicket, useThreadTicket } from "./hooks";
 import { DecisionCard } from "./DecisionCard";
 
 /** Rows in the thread Info tab; nothing for threads that are not tickets. */
@@ -58,6 +58,9 @@ export function TicketSegmentSummary({ threadId, isExpanded, onToggle }: Experim
     >
       <span className="font-mono text-foreground">{ticket.key}</span>
       <span>· {STAGE_LABELS[ticket.stage]}</span>
+      {ticket.planRound?.status === "open" && (
+        <span className="font-medium text-amber-700 dark:text-amber-300">· plan round {ticket.planRound.n} waits on you</span>
+      )}
       {open > 0 && <span className="font-medium text-amber-700 dark:text-amber-300">· {open} decision{open > 1 ? "s" : ""}</span>}
     </button>
   );
@@ -66,11 +69,22 @@ export function TicketSegmentSummary({ threadId, isExpanded, onToggle }: Experim
 /** Expanded below the row: the ticket's open decisions, answerable here. */
 export function TicketSegmentDetails({ threadId, isExpanded }: ExperimentalThreadContextSegmentProps) {
   const openTicket = useOpenTicket();
+  const go = useGo();
   const { data } = useThreadTicket(threadId);
   if (!isExpanded || !data?.ticket) return null;
   const open = data.decisions.filter((d) => d.status === "open");
+  const plan = data.ticket.planRound;
   return (
     <div className="max-h-96 space-y-2 overflow-y-auto py-2">
+      {plan?.status === "open" && (
+        <button
+          type="button"
+          className="text-sm font-medium hover:underline"
+          onClick={() => go.plan(data.ticket!.boardId, data.ticket!.key, plan.n)}
+        >
+          Review plan round {plan.n}
+        </button>
+      )}
       {open.length === 0 ? (
         <p className="text-xs text-muted-foreground">No open decisions for {data.ticket.key}.</p>
       ) : (

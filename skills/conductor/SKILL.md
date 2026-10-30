@@ -38,6 +38,31 @@ Note: …
 `[conductor] D-7 withdrawn by …` means drop the question; ask again only with
 new context.
 
+## Sending a plan for review: `conductor_submit_plan`
+
+- Write the plan to a Markdown file in your workspace, the board's plans
+  folder or your thread's storage folder, then call the tool with its absolute
+  `path` (and `summary`, one line, if useful). End your turn right after.
+- The user reads the plan rendered, marks passages (comment, remove, replace)
+  and adds an overall comment, then approves or requests changes. The result
+  comes back as a message:
+
+```
+[conductor] Plan round 2 for ABC-123: changes requested
+Plan: /…/plan.md (round 2, sha 1f3c2a9b)
+
+I've reviewed this plan and have 2 pieces of feedback:
+
+## 1. (lines 12–14) Feedback on: "resize on read"
+> Use a queue.
+
+## 2. (line 20) Remove: "Add a CDN purge job"
+```
+
+- On changes requested, revise the same file and submit it again; each
+  submission is a new round. On approval, notes listed under "non-blocking
+  notes" are guidance; start building and report the stage `building`.
+
 ## Reporting progress: `conductor_report_stage`
 
 Stages: `planning`, `plan-review`, `building`, `code-review`, `draft-pr`,

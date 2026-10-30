@@ -18,6 +18,11 @@ answer goes straight back to the agent that asked.
   options, recommendation and reasoning land in your inbox, on the agent's
   thread and as a badge on the rail icon. Your answer is sent to the agent as a
   message.
+- **Plan review.** Agents send their plan with `conductor_submit_plan`. You
+  read it rendered, select text to comment on it, remove it or replace it,
+  add an overall comment, and approve or request changes. The marks go back
+  to the agent as one message, and each round keeps its own copy with a diff
+  against the round before.
 - **The orchestrator beside the board.** The side panel has an Orchestrator
   tab, and clicking an agent on a card opens its thread as a tab.
 - **Ticket context on every agent thread**: Info rows, a line above the

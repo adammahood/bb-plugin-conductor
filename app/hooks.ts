@@ -33,22 +33,28 @@ export const useOpenDecisions = () => useLiveQuery("decisions.list", { status: "
 export const useTicketDetail = (boardId: number, key: string) =>
   useLiveQuery("board.ticket", { boardId, key }, key !== "");
 export const useThreadTicket = (threadId: string) => useLiveQuery("thread.ticket", { threadId });
+export const usePlansWaiting = () => useLiveQuery("plans.waiting", null);
+export const usePlanRounds = (boardId: number, key: string) => useLiveQuery("plans.list", { boardId, key });
+export const usePlanRound = (roundId: number | null) =>
+  useLiveQuery("plans.get", { roundId: roundId ?? 1 }, roundId !== null);
 
 /** Orchestrator thread id → board id, kept live. */
 export function useLiveOrchestrators(): Record<string, number> {
   return useLiveQuery("orchestrators.list", null).data?.boards ?? {};
 }
 
+/** Decisions plus plan rounds waiting on the user; a plan round always blocks its lead. */
 export function useDecisionBadge(): ExperimentalBadge | null {
-  const { data } = useOpenDecisions();
-  const open = data?.decisions ?? [];
-  if (open.length === 0) return null;
-  const blocking = open.filter((d) => d.blocking).length;
-  return {
-    count: open.length,
-    tone: blocking > 0 ? "warning" : "neutral",
-    label: `${open.length} decision${open.length > 1 ? "s" : ""} waiting${blocking > 0 ? `, ${blocking} blocking` : ""}`,
-  };
+  const decisions = useOpenDecisions().data?.decisions ?? [];
+  const plans = usePlansWaiting().data?.rounds ?? [];
+  const count = decisions.length + plans.length;
+  if (count === 0) return null;
+  const blocking = decisions.filter((d) => d.blocking).length + plans.length;
+  const parts = [
+    decisions.length > 0 && `${decisions.length} decision${decisions.length > 1 ? "s" : ""}`,
+    plans.length > 0 && `${plans.length} plan${plans.length > 1 ? "s" : ""}`,
+  ].filter(Boolean);
+  return { count, tone: blocking > 0 ? "warning" : "neutral", label: `${parts.join(" and ")} waiting on you` };
 }
 
 /**
@@ -60,15 +66,20 @@ export type Route =
   | { kind: "start" }
   | { kind: "board"; boardId: number }
   | { kind: "settings"; boardId: number }
-  | { kind: "ticket"; boardId: number; key: string };
+  | { kind: "ticket"; boardId: number; key: string }
+  | { kind: "plan"; boardId: number; key: string; round: number | null };
 
 export function parseRoute(subPath: string): Route {
-  const [first = "", second = ""] = subPath.split("/").map((part) => decodeURIComponent(part));
+  const [first = "", second = "", third = "", fourth = ""] = subPath.split("/").map((part) => decodeURIComponent(part));
   if (first === "") return { kind: "home" };
   if (first === "new") return { kind: "start" };
   const boardId = Number(first);
   if (!Number.isInteger(boardId) || boardId < 1) return { kind: "home" };
   if (second === "settings") return { kind: "settings", boardId };
+  if (second !== "" && third === "plan") {
+    const round = Number(fourth);
+    return { kind: "plan", boardId, key: second, round: Number.isInteger(round) && round > 0 ? round : null };
+  }
   if (second !== "") return { kind: "ticket", boardId, key: second };
   return { kind: "board", boardId };
 }
@@ -86,6 +97,8 @@ export function useGo() {
     board: (boardId: number) => to(String(boardId)),
     ticket: (boardId: number, key: string) => to(`${boardId}/${encodeURIComponent(key)}`),
     settings: (boardId: number) => to(`${boardId}/settings`),
+    plan: (boardId: number, key: string, round?: number) =>
+      to(`${boardId}/${encodeURIComponent(key)}/plan${round ? `/${round}` : ""}`),
     start: () => to("new"),
   };
 }

@@ -8,9 +8,30 @@ import {
 } from "@get-bb/plugin-sdk/testing/app";
 import type { PluginRpcContract } from "@get-bb/plugin-sdk/app";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Board, BoardSummary, Decision, rpcContract, Ticket } from "../src/contract";
+import type { Board, BoardSummary, Decision, PlanMark, PlanRound, rpcContract, Ticket } from "../src/contract";
 import { boardOptionsSchema } from "../src/options";
 import { useDecisionBadge } from "../app/hooks";
+
+const PLAN = ["# Avatar uploads", "", "Store the original and resize on read.", "", "- Add a CDN purge job"].join("\n");
+
+const round: PlanRound = {
+  id: 9,
+  boardId: 1,
+  ticketKey: "ABC-101",
+  threadId: "thr_lead1",
+  n: 1,
+  path: "/work/acme/plans/abc-101.md",
+  sha256: "abc123abc123",
+  source: "submitted",
+  status: "open",
+  summary: null,
+  overallComment: null,
+  marks: 0,
+  submittedAt: Date.now(),
+  decidedAt: null,
+  deliveredAt: null,
+  deliveryError: null,
+};
 
 const ticket: Ticket = {
   boardId: 1,
@@ -33,7 +54,7 @@ const ticket: Ticket = {
   stageNote: null,
   sharedWith: ["ABC-103"],
   prs: [],
-  plan: { file: "2026-10-28-abc101-avatar-uploads.md", writtenAt: 1 },
+  planRound: round,
   openReview: null,
   openDecisions: 1,
   blockingDecisions: 1,
@@ -66,7 +87,7 @@ const drafted: Ticket = {
   key: "ABC-104",
   title: "Media Jobs - One upload path for every image",
   stage: "in-review",
-  plan: null,
+  planRound: null,
   sharedWith: [],
   openDecisions: 0,
   blockingDecisions: 0,
@@ -92,6 +113,7 @@ const board: Board = {
   integrations: { linear: true, codeReview: true },
   tickets: [ticket, drafted],
   reviewsWaiting: [],
+  plansWaiting: [],
   nextPr: { ticketKey: "ABC-104", repo: "media-jobs", number: 51, url: null, after: { number: 50, url: null } },
   lastSweepAt: 1,
   sweepError: null,
@@ -100,10 +122,32 @@ const board: Board = {
 // Typed against the real contract, widened for renderSlot's untyped default.
 const handlers = (h: Partial<PluginRpcTestHandlers<typeof rpcContract>>) => h as PluginRpcTestHandlers<PluginRpcContract>;
 
-const rpc = (decisions: Decision[] = [decision], boards: BoardSummary[] = [summary], current: Board = board) =>
+const rpc = (
+  decisions: Decision[] = [decision],
+  boards: BoardSummary[] = [summary],
+  current: Board = board,
+  plans: PlanRound[] = [],
+) =>
   handlers({
   "boards.list": () => ({ boards, integrations: current.integrations }),
   "board.list": () => current,
+  "plans.waiting": () => ({ rounds: plans }),
+  "plans.list": () => ({ rounds: [round] }),
+  "plans.get": () => ({ round, content: PLAN, marks: [] as PlanMark[] }),
+  "plans.mark.save": (input) => ({
+    id: 1,
+    roundId: input.roundId,
+    kind: input.kind,
+    quote: input.quote,
+    startLine: input.startLine,
+    endLine: input.endLine,
+    comment: input.comment ?? null,
+    replacement: input.replacement ?? null,
+    createdAt: 1,
+  }),
+  "plans.comment": () => round,
+  "plans.decide": ({ decision }) => ({ ...round, status: decision }),
+  "board.ticket": () => ({ detail: null }),
   "orchestrators.list": () => ({ boards: Object.fromEntries(boards.map((b) => [b.orchestratorThreadId, b.id])) }),
   "boards.create": ({ threadId }) => ({ ...summary, id: 2, orchestratorThreadId: threadId }),
   "boards.update": ({ boardId, name }) => ({ ...summary, id: boardId, name: name ?? summary.name }),
@@ -235,7 +279,7 @@ describe("badge", () => {
       expect(JSON.parse(slot.container.querySelector("output")!.textContent!)).toEqual({
         count: 1,
         tone: "warning",
-        label: "1 decision waiting, 1 blocking",
+        label: "1 decision waiting on you",
       }),
     );
   });
@@ -275,7 +319,7 @@ describe("thread context", () => {
     await waitFor(() =>
       expect(scripts.inspection.getThreadRowStatus("thr_impl1")).toEqual({
         icon: "CircleQuestion",
-        label: "Blocked on a decision from you",
+        label: "Waiting on you",
         tone: "error",
       }),
     );
@@ -328,5 +372,63 @@ describe("boards", () => {
     expect(item({ id: "thr_orch", parentThreadId: null })).toMatchObject({ label: "Open its Conductor board" });
     expect(item({ id: "thr_new", parentThreadId: null })).toMatchObject({ label: "Use as a Conductor board" });
     expect(item({ id: "thr_child", parentThreadId: "thr_orch" })).toBeNull();
+  });
+});
+
+describe("plan review", () => {
+  it("puts a waiting plan in Waiting on you and the badge, and opens it from there", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1" }, {
+      rpc: rpc([decision], [summary], { ...board, plansWaiting: [round] }, [round]),
+    });
+    cleanup = () => slot.lifecycle.unmount();
+    const waiting = await slot.findByText("Plan round 1");
+    expect(waiting.closest("article")!.textContent).toContain("ABC-101");
+    fireEvent.click(within(waiting.closest("article")!).getByRole("button", { name: "Review plan" }));
+    expect(slot.inspection.navigateCalls.at(-1)).toMatchObject({ method: "toPluginPanel", options: { subPath: "1/ABC-101/plan/1" } });
+  });
+
+  it("counts plans in the badge", async () => {
+    function BadgeProbe() {
+      return <output>{JSON.stringify(useDecisionBadge())}</output>;
+    }
+    const slot = renderSlot({ component: BadgeProbe }, {}, { rpc: rpc([], [summary], board, [round]) });
+    cleanup = () => slot.lifecycle.unmount();
+    await waitFor(() =>
+      expect(JSON.parse(slot.container.querySelector("output")!.textContent!)).toEqual({
+        count: 1,
+        tone: "warning",
+        label: "1 plan waiting on you",
+      }),
+    );
+  });
+
+  it("turns a selection into a mark on the right lines, and approves", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-101/plan/1" }, { rpc: rpc() });
+    cleanup = () => slot.lifecycle.unmount();
+    // The test runtime renders Markdown as its source text.
+    const text = await slot.findByText("- Add a CDN purge job");
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    fireEvent.mouseUp(text);
+    fireEvent.click(await slot.findByRole("button", { name: "Remove" }));
+    fireEvent.change(slot.getByLabelText("Why (optional)"), { target: { value: "URLs are versioned." } });
+    fireEvent.click(slot.getByRole("button", { name: "Add mark" }));
+    await waitFor(() =>
+      expect(slot.inspection.rpcCalls).toContainEqual({
+        method: "plans.mark.save",
+        input: { roundId: 9, kind: "remove", quote: "- Add a CDN purge job", startLine: 5, endLine: 5, comment: "URLs are versioned." },
+      }),
+    );
+
+    expect((slot.getByRole("button", { name: "Request changes" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(slot.getByRole("button", { name: "Approve" }));
+    await waitFor(() =>
+      expect(slot.inspection.rpcCalls).toContainEqual({
+        method: "plans.decide",
+        input: { roundId: 9, decision: "approved", overallComment: "" },
+      }),
+    );
   });
 });

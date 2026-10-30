@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- Plan review: `conductor_submit_plan`, a review page with comment, remove and replace marks, approve (with notes) or request changes, round history and a diff between revisions.
+- Plan rounds join decisions in Waiting on you, the inbox, the badge and the thread row icon.
+- A waiting plan in the plans folder opens a round on its own.
+- The "Plan rounds" rule now tells agents to submit plan files.
+
 ## 0.2.2
 
 - README screenshots from a demo board.

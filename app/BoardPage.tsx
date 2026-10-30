@@ -31,6 +31,7 @@ import {
   useReviewPolling,
   useTicketDetail,
 } from "./hooks";
+import { PlanReview } from "./PlanReview";
 import { StartBoard } from "./StartBoard";
 
 // The part of the bundled GitHub PR Status contract this page reads.
@@ -70,11 +71,12 @@ export function BoardPage({ subPath }: PluginNavPanelProps) {
   else if (boardId === null || !list!.some((b) => b.id === boardId)) body = <Empty>That board no longer exists.</Empty>;
   else if (route.kind === "settings") body = <BoardSettings boardId={boardId} />;
   else if (route.kind === "ticket") body = <TicketView boardId={boardId} ticketKey={route.key} />;
+  else if (route.kind === "plan") body = <PlanReview boardId={boardId} ticketKey={route.key} roundN={route.round} />;
   else body = <OverviewPage boardId={boardId} />;
 
   return (
     <div className="h-full overflow-y-auto p-4 md:p-5">
-      <div className="mx-auto w-full max-w-5xl space-y-6">{body}</div>
+      <div className={cn("mx-auto w-full space-y-6", route.kind === "plan" ? "max-w-6xl" : "max-w-5xl")}>{body}</div>
     </div>
   );
 }
@@ -170,6 +172,24 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
           ))}
         </div>
       </div>
+
+      {ticket.planRound && (
+        <Section title="Plan">
+          <p className="flex flex-wrap items-center gap-x-3 text-sm">
+            <span>
+              Round {ticket.planRound.n}: {ticket.planRound.status.replace("_", " ")}
+              {ticket.planRound.marks > 0 ? `, ${ticket.planRound.marks} marks` : ""}
+            </span>
+            <button
+              type="button"
+              className="font-medium hover:underline"
+              onClick={() => go.plan(boardId, ticket.key, ticket.planRound!.n)}
+            >
+              {ticket.planRound.status === "open" ? "Review plan" : "Open plan"}
+            </button>
+          </p>
+        </Section>
+      )}
 
       <Section title="Decisions" count={decisions.length}>
         {decisions.length === 0 ? (

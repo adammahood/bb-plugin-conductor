@@ -3,7 +3,7 @@
 // overlay reads open decisions and drives it.
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import type { PluginContentScriptContext, PluginComposerThreadRowStatus } from "@get-bb/plugin-sdk/app";
-import { useOpenDecisions } from "./hooks";
+import { useOpenDecisions, usePlansWaiting } from "./hooks";
 
 type Setter = (threadId: string, status: PluginComposerThreadRowStatus | null) => void;
 
@@ -34,22 +34,25 @@ function useSetter(): Setter | null {
 export function RowStatusOverlay() {
   const set = useSetter();
   const { data } = useOpenDecisions();
+  const plans = usePlansWaiting().data?.rounds;
   const shown = useRef(new Set<string>());
 
   useEffect(() => {
     if (!set || !data) return;
     const blocking = new Map<string, boolean>();
     for (const d of data.decisions) blocking.set(d.threadId, (blocking.get(d.threadId) ?? false) || d.blocking);
+    // A plan round waiting on the user always blocks the agent that sent it.
+    for (const round of plans ?? []) blocking.set(round.threadId, true);
     for (const id of shown.current) if (!blocking.has(id)) set(id, null);
     for (const [id, isBlocking] of blocking) {
       set(id, {
         icon: "CircleQuestion",
-        label: isBlocking ? "Blocked on a decision from you" : "Decision waiting for you",
+        label: isBlocking ? "Waiting on you" : "Decision waiting for you",
         tone: isBlocking ? "error" : "default",
       });
     }
     shown.current = new Set(blocking.keys());
-  }, [set, data]);
+  }, [set, data, plans]);
 
   return null;
 }

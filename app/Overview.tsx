@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { UrlLink, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { STAGES, type Board, type Decision, type PullRequest, type Stage, type Ticket } from "../src/contract";
+import { STAGES, type Board, type Decision, type PlanRound, type PullRequest, type Stage, type Ticket } from "../src/contract";
 import { useOpenAgentThread, useOpenOrchestratorTab } from "./AgentTabs";
 import { DecisionCard } from "./DecisionCard";
 import {
@@ -12,6 +12,7 @@ import {
   ago,
   errorText,
   shortTitle,
+  useGo,
   useOpenTicket,
   useOtherChildren,
   usePresence,
@@ -158,14 +159,17 @@ function NeedsYou({ board, decisions }: { board: Board; decisions: Decision[] })
       )}
     >
       <Slot
-        count={decisions.length}
-        label={decisions.length === 1 ? "decision" : "decisions"}
-        hot={decisions.length > 0}
+        count={decisions.length + board.plansWaiting.length}
+        label="waiting on you"
+        hot={decisions.length + board.plansWaiting.length > 0}
       >
-        {decisions.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Agents ask here with their options and reasoning.</p>
+        {decisions.length + board.plansWaiting.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Decisions and plans from your agents land here.</p>
         ) : (
           <div className="space-y-2">
+            {board.plansWaiting.map((round) => (
+              <PlanWaitingCard key={round.id} round={round} />
+            ))}
             {decisions.map((d) => (
               <DecisionCard key={d.id} decision={d} compact />
             ))}
@@ -410,6 +414,39 @@ function TicketCard({ ticket }: { ticket: Ticket }) {
   );
 }
 
+function PlanNote({ boardId, ticketKey, round }: { boardId: number; ticketKey: string; round: PlanRound }) {
+  const go = useGo();
+  const open = round.status === "open";
+  return (
+    <p className="flex flex-wrap items-center gap-x-2 text-[12.5px]">
+      <span className={open ? "text-[var(--brand,var(--attention))]" : "text-muted-foreground"}>
+        {open
+          ? `Plan round ${round.n} waits on you${round.marks > 0 ? `, ${round.marks} mark${round.marks > 1 ? "s" : ""} drafted` : ""}.`
+          : `Changes requested on plan round ${round.n}; the agent is revising.`}
+      </span>
+      <button type="button" className="font-medium hover:underline" onClick={() => go.plan(boardId, ticketKey, round.n)}>
+        {open ? "Review plan" : "See round"}
+      </button>
+    </p>
+  );
+}
+
+/** A plan round in Waiting on you: who sent it, when, and the way in. */
+function PlanWaitingCard({ round }: { round: PlanRound }) {
+  const go = useGo();
+  return (
+    <article className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-[var(--brand,var(--attention))] bg-card px-3 py-2 text-sm">
+      <span className="font-semibold">{round.ticketKey}</span>
+      <span>Plan round {round.n}</span>
+      <span className="text-xs text-muted-foreground">sent {ago(round.submittedAt)}</span>
+      {round.source === "inferred" && <span className="text-xs text-muted-foreground">found in the plans folder</span>}
+      <Button size="sm" className="ml-auto" onClick={() => go.plan(round.boardId, round.ticketKey, round.n)}>
+        Review plan
+      </Button>
+    </article>
+  );
+}
+
 function CardNote({ ticket }: { ticket: Ticket }) {
   if (ticket.openReview?.state === "with-agent") {
     return <p className="text-[12.5px] text-muted-foreground">Your review comments are with the agent.</p>;
@@ -424,12 +461,9 @@ function CardNote({ ticket }: { ticket: Ticket }) {
       </a>
     );
   }
-  if (ticket.stage === "plan-review" && ticket.plan) {
-    return (
-      <p className="text-[12.5px] text-muted-foreground">
-        Plan sent {ago(ticket.plan.writtenAt)}: {ticket.plan.file}. Reply in the lead thread to approve or change it.
-      </p>
-    );
+  const round = ticket.planRound;
+  if (round && (round.status === "open" || round.status === "changes_requested")) {
+    return <PlanNote boardId={ticket.boardId} ticketKey={ticket.key} round={round} />;
   }
   const merged = ticket.prs.filter((pr) => pr.state === "merged").length;
   const pushed = ticket.prs.filter((pr) => pr.state !== "local").length;
