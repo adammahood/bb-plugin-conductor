@@ -135,6 +135,15 @@ describe("splitPlan", () => {
   });
 });
 
+describe("splitPlan front matter", () => {
+  it("keeps YAML front matter as one block shown as code", () => {
+    const blocks = splitPlan(["---", "tags: [plan]", "status: draft", "---", "", "# Title"].join("\n"));
+    expect(blocks[0]).toMatchObject({ startLine: 1, endLine: 4, frontMatter: true });
+    expect(blocks[0]!.display).toBe("```yaml\ntags: [plan]\nstatus: draft\n```");
+    expect(blocks[1]).toMatchObject({ startLine: 6, endLine: 6, frontMatter: false, display: "# Title" });
+  });
+});
+
 describe("planDiff", () => {
   it("makes a one-file unified patch between two revisions", () => {
     const patch = planDiff("a\nb\nc\n", "a\nB\nc\n", "plan.md");

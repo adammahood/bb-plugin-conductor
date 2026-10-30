@@ -7,6 +7,9 @@ export interface PlanBlock {
   startLine: number;
   endLine: number;
   source: string;
+  /** What to render: the source, except YAML front matter, which shows as a code block. */
+  display: string;
+  frontMatter: boolean;
 }
 
 const FENCE = /^\s*(```|~~~)/;
@@ -23,12 +26,28 @@ export function splitPlan(markdown: string): PlanBlock[] {
   let kind: "fence" | "table" | "quote" | "list" | "text" | null = null;
 
   const close = (end: number) => {
-    if (start >= 0) blocks.push({ startLine: start + 1, endLine: end + 1, source: lines.slice(start, end + 1).join("\n") });
+    if (start >= 0) {
+      const source = lines.slice(start, end + 1).join("\n");
+      blocks.push({ startLine: start + 1, endLine: end + 1, source, display: source, frontMatter: false });
+    }
     start = -1;
     kind = null;
   };
 
-  for (let i = 0; i < lines.length; i += 1) {
+  let first = 0;
+  const fmEnd = lines[0]?.trim() === "---" ? lines.findIndex((line, i) => i > 0 && line.trim() === "---") : -1;
+  if (fmEnd > 0) {
+    blocks.push({
+      startLine: 1,
+      endLine: fmEnd + 1,
+      source: lines.slice(0, fmEnd + 1).join("\n"),
+      display: ["```yaml", ...lines.slice(1, fmEnd), "```"].join("\n"),
+      frontMatter: true,
+    });
+    first = fmEnd + 1;
+  }
+
+  for (let i = first; i < lines.length; i += 1) {
     const line = lines[i]!;
     if (kind === "fence") {
       if (FENCE.test(line)) close(i);

@@ -247,7 +247,7 @@ function PlanText({
               data-plan-end={block.endLine}
               className={cn("-ml-3 border-l-2 border-transparent pl-3", marked && "border-[var(--brand,var(--attention))]")}
             >
-              <Markdown content={block.source} />
+              <Markdown content={block.display} />
             </div>
           );
         })}
