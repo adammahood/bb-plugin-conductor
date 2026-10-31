@@ -735,6 +735,27 @@ describe("agent configuration", () => {
     expect(config.instructions).toContain("Rules Sam set for this board (board configuration, quoted):\n> Never deploy.\n> Ask before merging.");
   });
 
+  it("tells agents the Code Review Workspace folder-review loop only with the plugin", async () => {
+    const lead = { thread: { id: "thr_lead1" }, pluginMetadata: { boardId: 1, ticketKey: "ABC-101", role: "lead" } };
+    const board = { userName: "Sam", rules: { codeReviewRounds: true } };
+
+    const on = await resolve((await setup({ board })).harness, lead);
+    expect(on.instructions).toContain(
+      'run `bb review` with nothing after it in this ticket\'s own worktree, the first time with `--context "ABC-101: <ticket title>"`',
+    );
+    expect(on.instructions).toContain("Don't open one in a folder shared with other tickets or the orchestrator");
+    expect(on.instructions).toContain('`bb review report <id> done|declined --note "..."`');
+    expect(on.instructions).toContain("run `bb review ready`");
+    expect(on.instructions).toContain("Don't push until Sam or the review says so.");
+    expect(on.instructions).toContain(
+      "run `bb review report --commit <sha>` before pushing, then do what it prints: push exactly that commit, or wait. Never force-push.",
+    );
+    expect(on.instructions).toContain("Act only on what Sam sends back from the review.");
+
+    const missing = await resolve((await setup({ board, peers: ["linear"] })).harness, lead);
+    expect(missing.instructions).not.toContain("bb review");
+  });
+
   it("never mentions a person unless the board names one", async () => {
     const { harness } = await setup({ board: { rules: { planRounds: true, onePrAtATime: true } } });
     const config = await resolve(harness, { thread: { id: "thr_lead1" }, pluginMetadata: { boardId: 1, ticketKey: "ABC-101", role: "lead" } });
