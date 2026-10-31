@@ -267,6 +267,29 @@ describe("board page", () => {
   });
 });
 
+describe("review polling", () => {
+  it.each([
+    { codeReview: true, polls: 1 },
+    { codeReview: false, polls: 0 },
+  ])("asks the server to re-read reviews every few seconds only while Code Review Workspace answers (codeReview $codeReview)", async ({ codeReview, polls: expected }) => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const current = { ...board, integrations: { linear: true, codeReview } };
+      const slot = renderSlot(app.navPanels[0]!, { subPath: "1" }, {
+        rpc: handlers({ ...rpc([decision], [summary], current), "reviews.poll": () => ({ changed: false }) }),
+      });
+      cleanup = () => slot.lifecycle.unmount();
+      await slot.findByText("Accept avatar uploads on sign-up");
+      const polls = () => slot.inspection.rpcCalls.filter((call) => call.method === "reviews.poll").length;
+      expect(polls()).toBe(0);
+      vi.advanceTimersByTime(5_000);
+      await waitFor(() => expect(polls()).toBe(expected));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("badge", () => {
   function BadgeProbe() {
     return <output>{JSON.stringify(useDecisionBadge())}</output>;
