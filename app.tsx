@@ -22,7 +22,7 @@ export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "board",
     title: "Conductor",
-    icon: "Layers",
+    icon: "conductor/conductor",
     path: PANEL_PATH,
     component: BoardPage,
     headerContent: BoardHeader,
