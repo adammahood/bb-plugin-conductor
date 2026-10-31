@@ -10,7 +10,10 @@
     "name": "Conductor",
     "description": "A board for your orchestrated ticket agents: each ticket's stage and PRs, a decision inbox your agents ask through, and the orchestrator beside the board.",
     "branding": {
-      "icon": "Layers"
+      "icon": "./icons/conductor.svg",
+      "experimental_icons": {
+        "conductor": "./icons/conductor.svg"
+      }
     },
     "server": "./server.ts",
     "app": "./app.tsx"
