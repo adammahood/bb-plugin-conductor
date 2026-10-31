@@ -6,6 +6,9 @@
 - Plan rounds join decisions in Waiting on you, the inbox, the badge and the thread row icon.
 - A waiting plan in the plans folder opens a round on its own.
 - The "Plan rounds" rule now tells agents to submit plan files.
+- After you approve a plan or request changes, an Up next bar offers the next waiting plan, the board's open decisions, or the way back to the board.
+- A plan's YAML front matter shows as a code block.
+- A custom Conductor icon in the rail and the plugin list, by Andrew Bird (#1).
 
 ## 0.2.2
 
