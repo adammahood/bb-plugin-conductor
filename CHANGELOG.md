@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Done tickets leave the board after a few days (3 by default) or once their threads are archived, and the sidebar lists only open tickets. A filterable Done list, from the board or the sidebar's "Done (N)" row, keeps every Done ticket with its history.
+- Done tickets' decisions, plans and review rounds no longer count in the badge, the inbox or Waiting on you.
+- New board setting "Archive a ticket's threads when it's Done" (off by default). It archives a Done ticket's lead and implementer threads only when no PR is open, the agents are idle, nothing waits on you and every worktree is clean and pushed. Otherwise the ticket shows why it is kept.
+- Unarchive on a ticket brings its threads back and rebuilds removed worktrees. `bb conductor unarchive <key>` does the same.
+- The ticket's history records when it became Done and when its threads were archived or unarchived, including by hand in bb.
+- `bb conductor tickets` lists open tickets; `--done` or `--all` shows the rest.
+- Fix: the plans-folder fallback read a worktree's commit count from the wrong field, so it always thought a worktree had no commits.
+
 ## 0.3.1
 
 - Tickets move from In milestone to Done once their merged PRs reach the default branch: the milestone's release PR merged after them, or the milestone branch is an ancestor of the default branch. Needs `gh` logged in on the bb server.
