@@ -42,6 +42,8 @@ const ticket: Ticket = {
   linearUrl: "https://linear.app/acme/issue/ABC-101",
   linearState: "In Progress",
   linearStateType: "started",
+  doneAt: null,
+  archive: null,
   leadThreadId: "thr_lead1",
   implementerThreadIds: ["thr_impl1"],
   environmentId: "env_1",
@@ -264,6 +266,93 @@ describe("board page", () => {
         method: "decisions.answer",
         input: { id: 7, choice: "Watermark.URL" },
       }),
+    );
+  });
+});
+
+describe("done tickets", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const doneTicket = (key: string, title: string, ageMs: number, archive: Ticket["archive"] = null): Ticket => ({
+    ...drafted,
+    key,
+    title,
+    stage: "done",
+    doneAt: Date.now() - ageMs,
+    archive,
+    prs: [{ repo: "media-jobs", number: 60, url: null, label: null, base: null, state: "merged" }],
+  });
+  const recent = doneTicket("ABC-110", "Recent finish", 2 * 60 * 60 * 1000);
+  const old = doneTicket("ABC-111", "Old finish", 10 * DAY);
+  const archived = doneTicket("ABC-112", "Archived finish", 60 * 60 * 1000, {
+    state: "archived",
+    reason: null,
+    threadIds: ["thr_lead12"],
+    at: 1,
+  });
+  const kept = doneTicket("ABC-113", "Kept finish", 5 * DAY, { state: "kept", reason: "PR #57 held", threadIds: [], at: 1 });
+  const doneBoard: Board = { ...board, tickets: [ticket, drafted, recent, old, archived, kept] };
+  const keptDecision: Decision = { ...decision, id: 8, ref: "D-8", ticketKey: "ABC-113" };
+
+  it("shows only recent, unarchived Done tickets on the board, and links to the rest", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1" }, { rpc: rpc([decision], [summary], doneBoard) });
+    cleanup = () => slot.lifecycle.unmount();
+    await slot.findByText("Accept avatar uploads on sign-up");
+    const done = slot.getByRole("region", { name: "Done" });
+    expect(done.textContent).toContain("ABC-110");
+    expect(done.textContent).not.toContain("ABC-111");
+    expect(done.textContent).not.toContain("ABC-112");
+    fireEvent.click(within(done).getByRole("button", { name: "All 4 done tickets →" }));
+    expect(slot.inspection.navigateCalls.at(-1)).toMatchObject({ options: { subPath: "1/done" } });
+  });
+
+  it("keeps Done tickets out of the sidebar behind one Done row", async () => {
+    const slot = renderSlot({ component: app.navPanels[0]!.experimental_sidebar! }, { subPath: "1" }, {
+      rpc: rpc([decision], [summary], doneBoard),
+    });
+    cleanup = () => slot.lifecycle.unmount();
+    await slot.findByText("ABC-104");
+    expect(slot.queryByText("ABC-110")).toBeNull();
+    fireEvent.click(slot.getByRole("button", { name: "Done (4)" }));
+    expect(slot.inspection.navigateCalls.at(-1)).toMatchObject({ options: { subPath: "1/done" } });
+  });
+
+  it("lists every Done ticket with its archive state, filters them, and withdraws a decision that keeps one", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/done" }, {
+      rpc: { ...rpc([keptDecision], [summary], doneBoard), "decisions.withdraw": () => ({ ...keptDecision, status: "withdrawn" }) },
+    });
+    cleanup = () => slot.lifecycle.unmount();
+    await slot.findByText("Done (4)");
+    expect(slot.container.textContent).toContain("kept: PR #57 held");
+    expect(slot.container.textContent).toContain("Archived");
+    fireEvent.click(slot.getByRole("button", { name: "Withdraw decision" }));
+    await waitFor(() =>
+      expect(slot.inspection.rpcCalls).toContainEqual({ method: "decisions.withdraw", input: { id: 8, note: "The ticket is Done." } }),
+    );
+    fireEvent.change(slot.getByLabelText("Filter done tickets"), { target: { value: "old" } });
+    expect(slot.queryByText("ABC-110")).toBeNull();
+    expect(slot.getByText("ABC-111")).toBeTruthy();
+  });
+
+  it("offers Unarchive on an archived ticket and shows the archive in its history", async () => {
+    const detail = {
+      ticket: archived,
+      decisions: [],
+      stageEvents: [{ kind: "archived" as const, stage: null, note: "Archived 2 threads", threadId: null, at: 1 }],
+      reviews: [],
+      linear: null,
+    };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1/ABC-112" }, {
+      rpc: {
+        ...rpc([decision], [summary], doneBoard),
+        "board.ticket": () => ({ detail }),
+        "ticket.unarchive": () => ({ ticket: { ...archived, archive: { ...archived.archive!, state: "unarchived" as const } } }),
+      },
+    });
+    cleanup = () => slot.lifecycle.unmount();
+    await slot.findByText("Archived 2 threads");
+    fireEvent.click(slot.getByRole("button", { name: "Unarchive" }));
+    await waitFor(() =>
+      expect(slot.inspection.rpcCalls).toContainEqual({ method: "ticket.unarchive", input: { boardId: 1, key: "ABC-112" } }),
     );
   });
 });

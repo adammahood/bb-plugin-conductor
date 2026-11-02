@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import plugin, { ASK_TOOL, LEGACY_TOOLS, REPORT_TOOL, SETUP_SKILL, SKILL, SUBMIT_PLAN_TOOL } from "../server";
-import type { Board, Decision, PlanMark, PlanRound, TicketDetail } from "../src/contract";
+import type { Board, Decision, PlanMark, PlanRound, Ticket, TicketDetail } from "../src/contract";
 
 const ORCH = "thr_orch";
 
@@ -23,6 +23,10 @@ interface World {
   files: Record<string, string>;
   /** Linear states for keys looked up by identifier. */
   issueStates: Record<string, { stateName: string; tone: string }>;
+  /** Worktree state by environment id; clean and pushed when absent. */
+  workspaces: Record<string, { dirty?: boolean; ahead?: number; noUpstream?: boolean; inMain?: boolean; offline?: boolean }>;
+  /** Threads whose worktree bb removed after archiving. */
+  removed: string[];
 }
 
 function thread(id: string, parentThreadId: string, title: string, extra = {}) {
@@ -74,10 +78,21 @@ async function setup(
     round: {},
     files: {},
     issueStates: {},
+    workspaces: {},
+    removed: [],
     ...options.world,
   };
   const metadata = new Map<string, Record<string, unknown>>();
   const sent: { threadId: string; text: string; originPluginId?: string; mode: string }[] = [];
+  const calls: { archive: string[]; unarchive: string[]; restore: string[] } = { archive: [], unarchive: [], restore: [] };
+  const allThreads = () => Object.values(world.children).flat();
+  const setArchived = (threadId: string, at: number | null): string[] => {
+    const thread = allThreads().find((t) => t.id === threadId);
+    if (!thread) return [];
+    (thread as { archivedAt: number | null }).archivedAt = at;
+    // Like bb, archiving a thread takes its children with it.
+    return [threadId, ...(at === null ? [] : (world.children[threadId] ?? []).flatMap((child) => setArchived(child.id, at)))];
+  };
 
   const { bb, harness } = createFakePluginHost({
     pluginId: "conductor",
@@ -88,12 +103,32 @@ async function setup(
           id: threadId,
           title: threadId === ORCH ? "Orchestrator" : threadId,
           environmentId: `env_${threadId}`,
+          canRestoreEnvironment: world.removed.includes(threadId),
         }),
+        archive: async ({ threadId }: { threadId: string }) => {
+          calls.archive.push(threadId);
+          return { ok: true, archivedThreadIds: setArchived(threadId, 1_000) };
+        },
+        unarchive: async ({ threadId }: { threadId: string }) => {
+          calls.unarchive.push(threadId);
+          setArchived(threadId, null);
+          return { ok: true };
+        },
+        restoreEnvironment: async ({ threadId }: { threadId: string }) => {
+          calls.restore.push(threadId);
+          return {};
+        },
         storageLocation: async ({ threadId }: { threadId: string }) => ({ hostId: "host_1", storageRootPath: `/storage/${threadId}` }),
-        list: async ({ parentThreadId, threadIds }: { parentThreadId?: string; threadIds?: string[] } = {}) =>
+        list: async ({
+          parentThreadId,
+          threadIds,
+          environmentId,
+        }: { parentThreadId?: string; threadIds?: string[]; environmentId?: string } = {}) =>
           threadIds
-            ? Object.values(world.children).flat().filter((t) => threadIds.includes(t.id))
-            : (world.children[parentThreadId ?? ""] ?? []),
+            ? allThreads().filter((t) => threadIds.includes(t.id))
+            : environmentId
+              ? allThreads().filter((t) => t.environmentId === environmentId)
+              : (world.children[parentThreadId ?? ""] ?? []),
         events: {
           list: async ({ threadId }: { threadId: string }) =>
             (world.replies[threadId] ?? []).map((reply, i) => ({ type: "client/turn/requested", seq: i, ...reply })),
@@ -129,7 +164,28 @@ async function setup(
         },
       },
       environments: {
-        status: async () => ({ mergeBase: { aheadCount: 0 } }),
+        status: async ({ environmentId, mergeBaseBranch }: { environmentId: string; mergeBaseBranch?: string }) => {
+          const ws = world.workspaces[environmentId] ?? {};
+          if (ws.offline) return { outcome: "unavailable", message: "machine offline" };
+          const branch = `bb/${environmentId}`;
+          const upstream = mergeBaseBranch === `origin/${branch}`;
+          const main = mergeBaseBranch === "origin/main";
+          const missing = upstream && ws.noUpstream;
+          return {
+            outcome: "available",
+            workspace: {
+              branch: { currentBranch: branch, defaultBranch: "main" },
+              checkout: { kind: "branch", branchName: branch, headSha: "abc" },
+              workingTree: { hasUncommittedChanges: ws.dirty ?? false },
+              mergeBase: {
+                baseRef: missing ? null : "def",
+                aheadCount: missing ? 0 : upstream ? (ws.ahead ?? 0) : main ? 3 : 0,
+                hasCommittedUnmergedChanges: main ? !ws.inMain : false,
+                squashMergeCheckComplete: true,
+              },
+            },
+          };
+        },
         get: async ({ environmentId }: { environmentId: string }) => ({
           path: `/work/${environmentId}`,
           hostId: "host_1",
@@ -206,7 +262,7 @@ async function setup(
     await harness.behavior.callRpc("boards.update", { boardId: 1, options: { githubOwner: "acme", ...options.board } });
     await harness.behavior.callRpc("board.refresh", { boardId: 1 });
   }
-  return { harness, metadata, sent, world, ghCalls };
+  return { harness, metadata, sent, world, ghCalls, calls };
 }
 
 type Harness = Awaited<ReturnType<typeof setup>>["harness"];
@@ -546,6 +602,150 @@ describe("done after release", () => {
     world.issueStates["ABC-102"] = { stateName: "Done", tone: "completed" };
     await harness.behavior.callRpc("board.refresh", { boardId: 1 });
     expect(await stageOf(harness, "ABC-102")).toBe("done");
+  });
+});
+
+describe("done tickets", () => {
+  const noReview = { round: { userArchivedAt: 1 } };
+  const archiving = { archiveDoneThreads: true };
+  const pr = (number: number, state: string) => ({ repo: "web", number, state });
+  const ticketOf = async (harness: Harness, key: string) =>
+    ((await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board).tickets.find((t) => t.key === key)!;
+  const refresh = (harness: Harness) => harness.behavior.callRpc("board.refresh", { boardId: 1 });
+  const done = (harness: Harness, threadId: string, prs = [pr(40, "merged")]) =>
+    harness.behavior.callAgentTool(REPORT_TOOL, { stage: "done", prs }, { threadId });
+
+  it("archives a Done ticket's lead and implementers once it is safe, and records it", async () => {
+    const { harness, calls } = await setup({ world: noReview, board: archiving });
+    await done(harness, "thr_lead1");
+    await refresh(harness);
+    // Archiving the lead takes its implementer with it; nothing else is touched.
+    expect(calls.archive).toEqual(["thr_lead1"]);
+    const ticket = await ticketOf(harness, "ABC-101");
+    expect(ticket.archive).toMatchObject({ state: "archived", reason: null, threadIds: ["thr_lead1", "thr_impl1"] });
+    expect(ticket.doneAt).not.toBeNull();
+    const { detail } = (await harness.behavior.callRpc("board.ticket", { boardId: 1, key: "ABC-101" })) as { detail: TicketDetail };
+    expect(detail.stageEvents[0]).toMatchObject({ kind: "archived", note: "Archived 2 threads" });
+  });
+
+  it("keeps a ticket with the reason, and archives it on a later sweep once the check passes", async () => {
+    const { harness, calls } = await setup({ world: noReview, board: archiving });
+    await done(harness, "thr_lead1", [pr(56, "merged"), pr(57, "held")]);
+    await refresh(harness);
+    expect((await ticketOf(harness, "ABC-101")).archive).toMatchObject({ state: "kept", reason: "PR #57 held" });
+    expect(calls.archive).toEqual([]);
+    await done(harness, "thr_lead1", [pr(56, "merged"), pr(57, "closed")]);
+    await refresh(harness);
+    expect((await ticketOf(harness, "ABC-101")).archive).toMatchObject({ state: "archived" });
+  });
+
+  it.each([
+    [{ dirty: true }, "uncommitted changes in bb/env_thr_impl1"],
+    [{ ahead: 2 }, "2 unpushed commits"],
+    [{ noUpstream: true }, "branch not on the remote"],
+    [{ offline: true }, "workspace unavailable"],
+    [{ noUpstream: true, inMain: true }, null],
+  ])("checks each worktree before archiving: %o", async (workspace, reason) => {
+    const { harness, calls } = await setup({ world: { ...noReview, workspaces: { env_thr_impl1: workspace } }, board: archiving });
+    await done(harness, "thr_lead1");
+    await refresh(harness);
+    const { archive } = await ticketOf(harness, "ABC-101");
+    if (reason) {
+      expect(archive).toMatchObject({ state: "kept", reason });
+      expect(calls.archive).toEqual([]);
+    } else {
+      expect(archive).toMatchObject({ state: "archived" });
+    }
+  });
+
+  it("keeps a ticket while an agent runs", async () => {
+    const children = {
+      [ORCH]: [thread("thr_lead1", ORCH, "ABC-101 avatar uploads", { status: "active" })],
+      thr_lead1: [],
+    };
+    const { harness } = await setup({ world: { ...noReview, children }, board: archiving });
+    await done(harness, "thr_lead1");
+    await refresh(harness);
+    expect((await ticketOf(harness, "ABC-101")).archive).toMatchObject({ state: "kept", reason: "an agent is running" });
+  });
+
+  it("keeps tickets that share a worktree until every one is Done, then archives them together", async () => {
+    const children = {
+      [ORCH]: [
+        thread("thr_lead1", ORCH, "ABC-101 avatar uploads"),
+        thread("thr_lead2", ORCH, "ABC-102 image sizes", { environmentId: "env_thr_lead1" }),
+        thread("thr_other", ORCH, "Investigate flaky CI"),
+      ],
+      thr_lead1: [thread("thr_impl1", "thr_lead1", "ABC-101 impl")],
+    };
+    const { harness, calls } = await setup({ world: { ...noReview, children }, board: archiving });
+    await done(harness, "thr_lead2");
+    await refresh(harness);
+    expect((await ticketOf(harness, "ABC-102")).archive).toMatchObject({ state: "kept", reason: "workspace shared with ABC-101" });
+    await done(harness, "thr_lead1");
+    await refresh(harness);
+    expect(calls.archive.sort()).toEqual(["thr_lead1", "thr_lead2"]);
+    expect((await ticketOf(harness, "ABC-102")).archive).toMatchObject({ state: "archived" });
+    expect(calls.archive).not.toContain(ORCH);
+    expect(calls.archive).not.toContain("thr_other");
+  });
+
+  it("keeps a worktree another thread still uses", async () => {
+    const children = {
+      [ORCH]: [
+        thread("thr_lead2", ORCH, "ABC-102 image sizes"),
+        thread("thr_other", ORCH, "Investigate flaky CI", { environmentId: "env_thr_lead2" }),
+      ],
+    };
+    const { harness, calls } = await setup({ world: { ...noReview, children }, board: archiving });
+    await done(harness, "thr_lead2");
+    await refresh(harness);
+    expect((await ticketOf(harness, "ABC-102")).archive).toMatchObject({
+      state: "kept",
+      reason: 'workspace shared with "Investigate flaky CI"',
+    });
+    expect(calls.archive).toEqual([]);
+  });
+
+  it("leaves a Done ticket's decisions out of the inbox, and keeps its threads for them", async () => {
+    const { harness } = await setup({ world: noReview, board: archiving });
+    await ask(harness, "thr_lead2", { blocking: false });
+    await done(harness, "thr_lead2");
+    await refresh(harness);
+    expect(await openDecisions(harness)).toEqual([]);
+    const all = (await harness.behavior.callRpc("decisions.list", { status: "open", includeDone: true })) as { decisions: Decision[] };
+    expect(all.decisions).toHaveLength(1);
+    const { boards } = (await harness.behavior.callRpc("boards.list", null)) as { boards: { openDecisions: number }[] };
+    expect(boards[0]!.openDecisions).toBe(0);
+    expect((await ticketOf(harness, "ABC-102")).archive).toMatchObject({ state: "kept", reason: "1 open decision" });
+  });
+
+  it("unarchives the threads, restores removed worktrees, and never archives that ticket again", async () => {
+    const { harness, calls, world } = await setup({ world: noReview, board: archiving });
+    await done(harness, "thr_lead1");
+    await refresh(harness);
+    world.removed = ["thr_lead1"];
+    const { ticket } = (await harness.behavior.callRpc("ticket.unarchive", { boardId: 1, key: "ABC-101" })) as { ticket: Ticket };
+    expect(calls.unarchive).toEqual(["thr_lead1", "thr_impl1"]);
+    expect(calls.restore).toEqual(["thr_lead1"]);
+    expect(ticket.archive).toMatchObject({ state: "unarchived" });
+    await refresh(harness);
+    expect(calls.archive).toEqual(["thr_lead1"]);
+    const { detail } = (await harness.behavior.callRpc("board.ticket", { boardId: 1, key: "ABC-101" })) as { detail: TicketDetail };
+    expect(detail.stageEvents[0]).toMatchObject({ kind: "unarchived", note: "Unarchived 2 threads, restored 1 worktree" });
+  });
+
+  it("archives nothing with the setting off, but records threads archived by hand and when a ticket was Done", async () => {
+    const { harness, calls, world } = await setup({ world: noReview });
+    await done(harness, "thr_lead2");
+    await refresh(harness);
+    expect(calls.archive).toEqual([]);
+    expect(await ticketOf(harness, "ABC-102")).toMatchObject({ archive: null, doneAt: expect.any(Number) });
+    (world.children[ORCH]!.find((t) => t.id === "thr_lead2") as { archivedAt: number | null }).archivedAt = 5_000;
+    await refresh(harness);
+    expect((await ticketOf(harness, "ABC-102")).archive).toMatchObject({ state: "archived", at: 5_000 });
+    await harness.behavior.callAgentTool(REPORT_TOOL, { stage: "building" }, { threadId: "thr_lead2" });
+    expect((await ticketOf(harness, "ABC-102")).doneAt).toBeNull();
   });
 });
 

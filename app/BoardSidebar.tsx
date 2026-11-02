@@ -21,7 +21,9 @@ export function BoardSidebar({ subPath }: PluginNavPanelProps) {
   const board = useBoard(boardId);
   const open = useOpenDecisions().data?.decisions ?? [];
   const plans = usePlansWaiting().data?.rounds ?? [];
-  const tickets = board.data?.tickets ?? [];
+  const all = board.data?.tickets ?? [];
+  const tickets = all.filter((t) => t.stage !== "done");
+  const done = all.length - tickets.length;
   const currentKey = route.kind === "ticket" ? route.key : null;
   const boardName = (id: number) => boards.find((b) => b.id === id)?.name ?? `Board ${id}`;
 
@@ -82,6 +84,11 @@ export function BoardSidebar({ subPath }: PluginNavPanelProps) {
               </span>
             </Row>
           ))}
+          {done > 0 && (
+            <Row active={route.kind === "done"} onClick={() => go.done(boardId)}>
+              <span className="text-xs text-muted-foreground">Done ({done})</span>
+            </Row>
+          )}
         </Group>
       )}
     </nav>

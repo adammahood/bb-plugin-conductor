@@ -91,9 +91,30 @@ The first rule that matches wins:
 7. **Draft PRs**, **Building** (an agent is running) or **Planning** from the
    facts.
 
+## Done tickets
+
+- The board shows Done tickets for a few days (3 by default, per board). After
+  that, or once their threads are archived, they move to the Done list, which
+  you open from the board or the sidebar's "Done (N)" row. It can be filtered,
+  and every ticket keeps its page and history.
+- Done tickets' decisions, plans and review rounds leave the badge, the inbox
+  and Waiting on you.
+- With "Archive a ticket's threads when it's Done" on, the board archives a
+  Done ticket's lead and implementer threads (never the orchestrator) once:
+  - no PR is open, draft, held or unpushed;
+  - its agents are idle and nothing waits on you;
+  - every worktree has no uncommitted changes or unpushed commits;
+  - no other ticket or thread uses the same worktree.
+
+  Otherwise the ticket shows why it is kept, and the next sweep tries again.
+  Tickets sharing a lead or a worktree go together. bb may remove an archived
+  worktree's folder; the branch stays. **Unarchive** on the ticket brings the
+  threads back and rebuilds removed worktrees, and the board leaves that
+  ticket alone afterwards. Nothing is ever deleted.
+
 ## CLI
 
-`bb conductor tickets | decisions | answer | withdraw | report | sweep`,
+`bb conductor tickets | decisions | answer | withdraw | report | unarchive | sweep`,
 `bb conductor board list | create | set | remove`, and
 `bb conductor import-phase-board`. Run any with `--help`.
 

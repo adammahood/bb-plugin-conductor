@@ -15,8 +15,10 @@ import {
   type Role,
   type Stage,
   type Ticket,
+  type TicketArchive,
   type TicketDetail,
 } from "./contract";
+import { ticketBlocker, workspaceBlocker } from "./archive";
 import { discoverTickets } from "./discovery";
 import type { Landings } from "./github";
 import { compileRegex, DEFAULT_TICKET_PATTERN, milestoneFor, type BoardOptions } from "./options";
@@ -46,6 +48,8 @@ type WaitingReview = Review & { ticketKey: string };
 /** Facts gathered from bb and other plugins; refreshed by sweeps and thread events. */
 interface Facts {
   statuses: Map<string, string>;
+  /** Each ticket thread's workspace and archive time. */
+  threads: Map<string, { environmentId: string | null; archivedAt: number | null }>;
   reviews: WaitingReview[];
 }
 
@@ -58,7 +62,8 @@ const isRunning = (status: string | undefined) =>
 /** One board: discovery, facts and stages for the threads under its orchestrator. */
 export class BoardEngine {
   private sweeping: Promise<void> | null = null;
-  private facts: Facts = { statuses: new Map(), reviews: [] };
+  private archiving: Promise<void> | null = null;
+  private facts: Facts = { statuses: new Map(), threads: new Map(), reviews: [] };
   private reviewsReadAt = 0;
 
   constructor(
@@ -100,6 +105,9 @@ export class BoardEngine {
       });
       if (this.integrations().linear) await this.refreshLinearStates(result.bound);
       await this.refreshFacts();
+      this.trackDone();
+      this.syncArchives();
+      await this.archiveDone();
       root.setSweep(this.boardId, result.warning);
     } catch (error) {
       this.bb.log.warn(`sweep board ${this.boardId}: ${String(error)}`);
@@ -120,13 +128,16 @@ export class BoardEngine {
   private async refreshFacts(): Promise<void> {
     const ids = this.ticketThreadIds();
     const statuses = new Map<string, string>();
+    const threads: Facts["threads"] = new Map();
     for (let i = 0; i < ids.length; i += 200) {
       const batch = ids.slice(i, i + 200);
       for (const thread of await this.bb.sdk.threads.list({ threadIds: batch, limit: 200 })) {
         statuses.set(thread.id, thread.status);
+        threads.set(thread.id, { environmentId: thread.environmentId ?? null, archivedAt: thread.archivedAt ?? null });
       }
     }
     this.facts.statuses = statuses;
+    this.facts.threads = threads;
     await this.refreshReviews(ids);
     await this.inferPlanRounds(this.store.listTickets());
     await this.refreshLandings(this.store.listTickets());
@@ -310,9 +321,9 @@ export class BoardEngine {
     if (!environmentId) return true;
     try {
       const status = (await this.bb.sdk.environments.status({ environmentId })) as {
-        mergeBase?: { aheadCount?: number } | null;
+        workspace?: { mergeBase?: { aheadCount?: number } | null };
       };
-      return (status.mergeBase?.aheadCount ?? 0) === 0;
+      return (status.workspace?.mergeBase?.aheadCount ?? 0) === 0;
     } catch {
       return true;
     }
@@ -353,33 +364,233 @@ export class BoardEngine {
       milestone: ticket.milestone ?? milestoneFor(this.config().options, ticket.base),
       stage: decision.stage,
       stageSource: decision.source,
+      archive: this.archiveView(ticket),
       openReview: review
         ? { targetKey: review.targetKey, gitRef: review.gitRef, state: review.state as "needs-review" | "with-agent" }
         : null,
     };
   }
 
+  private ticketThreads(ticket: Ticket): string[] {
+    return [ticket.leadThreadId, ...ticket.implementerThreadIds];
+  }
+
+  /** The stored archive state, corrected by what bb says now: threads archived or unarchived by hand. */
+  private archiveView(ticket: Ticket): TicketArchive | null {
+    const stored = ticket.archive;
+    const ids = this.ticketThreads(ticket);
+    const threads = ids.map((id) => this.facts.threads.get(id));
+    if (threads.some((t) => t === undefined)) return stored;
+    const archivedAt = threads.map((t) => t!.archivedAt);
+    const all = archivedAt.every((at) => at !== null);
+    if (stored?.state === "archived" && !all) return { state: "unarchived", reason: null, threadIds: stored.threadIds, at: stored.at };
+    if (all && stored?.state !== "archived") {
+      return { state: "archived", reason: null, threadIds: ids, at: Math.max(...(archivedAt as number[])) };
+    }
+    return stored;
+  }
+
+  /** Records when tickets become Done, with a history entry for an inferred Done. */
+  private trackDone(tickets = this.store.listTickets()): void {
+    for (const stored of tickets) {
+      const ticket = this.withStage(stored);
+      const why =
+        ticket.stageSource === "reported"
+          ? null
+          : ticket.linearStateType === "completed"
+            ? "Linear has it completed"
+            : "Its PRs reached the default branch";
+      this.store.setDone(ticket.key, ticket.stage === "done", why);
+    }
+  }
+
+  /** Writes archiving or unarchiving done in bb by hand into Done tickets' history. */
+  private syncArchives(): void {
+    for (const ticket of this.store.listTickets().map((t) => this.withStage(t))) {
+      const view = ticket.archive;
+      const stored = this.store.archiveState(ticket.key);
+      if (ticket.stage !== "done" || !view || view.state === "kept" || view.state === stored?.state) continue;
+      const note = `${view.state === "archived" ? "Archived" : "Unarchived"} in bb`;
+      this.store.setArchiveState(ticket.key, view.state, null, view.threadIds, note, view.state === "archived" ? view.at : undefined);
+    }
+  }
+
+  /**
+   * With the board's setting on, archives Done tickets whose threads are safe
+   * to retire. Tickets that share a lead or a worktree go together, so one
+   * that is not Done keeps the others; the reason shows on each.
+   */
+  private archiveDone(): Promise<void> {
+    this.archiving ??= this.runArchive().finally(() => {
+      this.archiving = null;
+    });
+    return this.archiving;
+  }
+
+  private async runArchive(): Promise<void> {
+    if (!this.store.record().options.archiveDoneThreads) return;
+    const tickets = this.store.listTickets().map((t) => this.withStage(t));
+    const done = new Set<string>();
+    for (const ticket of tickets) {
+      if (done.has(ticket.key) || ticket.stage !== "done" || ticket.archive?.state === "archived" || ticket.archive?.state === "unarchived") continue;
+      const group = this.archiveGroup(ticket, tickets);
+      for (const t of group) done.add(t.key);
+      const reason = await this.archiveBlocker(ticket, group);
+      if (reason) {
+        for (const t of group) {
+          if (t.stage === "done" && t.archive?.state !== "archived" && t.archive?.state !== "unarchived") {
+            this.store.setArchiveState(t.key, "kept", reason, []);
+          }
+        }
+        continue;
+      }
+      await this.archiveThreads(group);
+    }
+  }
+
+  /** The ticket plus every ticket it shares a lead or a worktree with, transitively. */
+  private archiveGroup(ticket: Ticket, tickets: Ticket[]): Ticket[] {
+    const envs = (t: Ticket) =>
+      this.ticketThreads(t)
+        .map((id) => this.facts.threads.get(id))
+        .filter((f) => f && f.archivedAt === null && f.environmentId)
+        .map((f) => f!.environmentId!);
+    const group = [ticket];
+    for (let i = 0; i < group.length; i += 1) {
+      const current = group[i]!;
+      const mine = new Set(envs(current));
+      for (const other of tickets) {
+        if (group.includes(other) || other.archive?.state === "archived") continue;
+        if (other.leadThreadId === current.leadThreadId || envs(other).some((env) => mine.has(env))) group.push(other);
+      }
+    }
+    return group;
+  }
+
+  private async archiveBlocker(ticket: Ticket, group: Ticket[]): Promise<string | null> {
+    for (const other of group) {
+      if (other === ticket) continue;
+      const how = other.leadThreadId === ticket.leadThreadId ? "lead also works" : "workspace shared with";
+      if (other.stage !== "done") return `${how} ${other.key}`;
+      if (other.archive?.state === "unarchived") return `${how} ${other.key}, which was unarchived`;
+    }
+    const orchestrator = this.store.record().orchestratorThreadId;
+    const ids = new Set(group.flatMap((t) => this.ticketThreads(t)));
+    if (ids.has(orchestrator)) return "the orchestrator works this ticket";
+    for (const t of group) {
+      const reason = ticketBlocker(t, {
+        reviewOpen: this.facts.reviews.some((r) => r.ticketKey === t.key),
+        running: false,
+      });
+      if (reason) return group.length > 1 && t !== ticket ? `${t.key}: ${reason}` : reason;
+    }
+    // Fresh reads: status, and every thread on each worktree.
+    const fresh = await this.bb.sdk.threads.list({ threadIds: [...ids], limit: 200 });
+    if (fresh.some((t) => t.archivedAt == null && isRunning(t.status))) return "an agent is running";
+    const envs = [...new Set(fresh.filter((t) => t.archivedAt == null && t.environmentId).map((t) => t.environmentId!))];
+    for (const environmentId of envs) {
+      const users = await this.bb.sdk.threads.list({ environmentId, limit: 200 });
+      const outsider = users.find((t) => t.archivedAt == null && !ids.has(t.id));
+      if (outsider) {
+        const key = this.store.threadTickets(outsider.id)[0]?.ticketKey;
+        const name = outsider.id === orchestrator ? "the orchestrator" : (key ?? `"${outsider.title ?? outsider.id}"`);
+        return `workspace shared with ${name}`;
+      }
+      const reason = await workspaceBlocker(this.bb, environmentId);
+      if (reason) return reason;
+    }
+    return null;
+  }
+
+  private async archiveThreads(group: Ticket[]): Promise<void> {
+    const orchestrator = this.store.record().orchestratorThreadId;
+    const archived = new Set<string>();
+    // A lead's archive takes its implementers with it; leads go first.
+    const order = [...new Set([...group.map((t) => t.leadThreadId), ...group.flatMap((t) => t.implementerThreadIds)])];
+    for (const threadId of order) {
+      if (threadId === orchestrator || archived.has(threadId) || this.facts.threads.get(threadId)?.archivedAt != null) continue;
+      try {
+        const result = await this.bb.sdk.threads.archive({ threadId });
+        for (const id of result.archivedThreadIds) archived.add(id);
+        archived.add(threadId);
+      } catch (error) {
+        this.bb.log.warn(`archive ${threadId}: ${String(error).slice(0, 300)}`);
+      }
+    }
+    for (const ticket of group) {
+      const ids = this.ticketThreads(ticket);
+      const count = ids.filter((id) => archived.has(id)).length;
+      if (count === 0) continue;
+      this.store.setArchiveState(ticket.key, "archived", null, ids, `Archived ${count === 1 ? "1 thread" : `${count} threads`}`);
+      for (const id of ids) {
+        const fact = this.facts.threads.get(id);
+        if (fact && archived.has(id)) fact.archivedAt = Date.now();
+      }
+    }
+  }
+
+  /** Brings a ticket's threads back, rebuilding worktrees bb already removed; the board then leaves them alone. */
+  async unarchive(key: string): Promise<Ticket> {
+    const stored = this.store.getTicket(key);
+    if (!stored) throw new Error(`No ticket ${key} on the board.`);
+    const ticket = this.withStage(stored);
+    const ids = ticket.archive?.threadIds.length ? ticket.archive.threadIds : this.ticketThreads(ticket);
+    const orchestrator = this.store.record().orchestratorThreadId;
+    let restored = 0;
+    for (const threadId of ids) {
+      if (threadId === orchestrator) continue;
+      await this.bb.sdk.threads.unarchive({ threadId }).catch((error: unknown) => {
+        this.bb.log.warn(`unarchive ${threadId}: ${String(error).slice(0, 300)}`);
+      });
+    }
+    for (const threadId of ids) {
+      const thread = (await this.bb.sdk.threads.get({ threadId }).catch(() => null)) as { canRestoreEnvironment?: boolean } | null;
+      if (!thread?.canRestoreEnvironment) continue;
+      await this.bb.sdk.threads.restoreEnvironment({ threadId }).then(
+        () => (restored += 1),
+        (error: unknown) => this.bb.log.warn(`restore ${threadId}: ${String(error).slice(0, 300)}`),
+      );
+    }
+    const note = `Unarchived ${ids.length === 1 ? "1 thread" : `${ids.length} threads`}${restored ? `, restored ${restored === 1 ? "1 worktree" : `${restored} worktrees`}` : ""}`;
+    this.store.setArchiveState(key, "unarchived", null, ids, note);
+    await this.refreshFacts();
+    this.changed();
+    return this.withStage(this.store.getTicket(key)!);
+  }
+
   summary(): BoardSummary {
     const board = this.store.record();
+    const done = this.doneKeys();
     return {
       id: board.id,
       name: board.name,
       orchestratorThreadId: board.orchestratorThreadId,
       options: board.options,
-      openDecisions: this.store.listDecisions({ status: "open" }).length,
+      openDecisions: this.store.listDecisions({ status: "open" }).filter((d) => !done.has(d.ticketKey)).length,
       tickets: this.store.listTickets().length,
     };
+  }
+
+  doneKeys(): Set<string> {
+    return new Set(
+      this.store
+        .listTickets()
+        .map((t) => this.withStage(t))
+        .filter((t) => t.stage === "done")
+        .map((t) => t.key),
+    );
   }
 
   board(): Board {
     const record = this.store.record();
     const tickets = this.store.listTickets().map((t) => this.withStage(t));
+    const done = new Set(tickets.filter((t) => t.stage === "done").map((t) => t.key));
     return {
       board: this.summary(),
       integrations: this.integrations(),
       tickets,
-      reviewsWaiting: this.facts.reviews.filter((r) => r.state === "needs-review"),
-      plansWaiting: this.store.root.waitingRounds(this.boardId),
+      reviewsWaiting: this.facts.reviews.filter((r) => r.state === "needs-review" && !done.has(r.ticketKey)),
+      plansWaiting: this.store.root.waitingRounds(this.boardId).filter((r) => !done.has(r.ticketKey)),
       nextPr: record.options.rules.onePrAtATime ? nextPrToOpen(tickets) : null,
       lastSweepAt: record.lastSweepAt,
       sweepError: record.sweepError,
@@ -481,8 +692,10 @@ export class BoardEngine {
     }
     this.store.reportStage({ ...input, ticketKey, threadId });
     await this.refreshReviews();
+    this.trackDone([this.store.getTicket(ticketKey)!]);
     const ticket = this.store.getTicket(ticketKey)!;
     this.changed();
+    if (input.stage === "done") void this.archiveDone().then(() => this.changed());
     if (input.prs?.some((pr) => pr.state === "merged")) {
       void this.refreshLandings([ticket]).then(() => this.changed());
     }

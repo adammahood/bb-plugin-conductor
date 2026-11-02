@@ -8,7 +8,7 @@ import {
 import { useEffect } from "react";
 import type { ExperimentalBadge } from "@get-bb/plugin-sdk/app";
 import type { z } from "zod";
-import { CHANGED, rpcContract, type Stage } from "../src/contract";
+import { CHANGED, rpcContract, type Stage, type Ticket } from "../src/contract";
 
 export const PANEL_PATH = "board";
 
@@ -30,6 +30,8 @@ function useLiveQuery<M extends Method>(
 export const useBoards = () => useLiveQuery("boards.list", null);
 export const useBoard = (boardId: number | null) => useLiveQuery("board.list", { boardId: boardId ?? 1 }, boardId !== null);
 export const useOpenDecisions = () => useLiveQuery("decisions.list", { status: "open" });
+export const useBoardDecisions = (boardId: number) =>
+  useLiveQuery("decisions.list", { status: "open", boardId, includeDone: true });
 export const useTicketDetail = (boardId: number, key: string) =>
   useLiveQuery("board.ticket", { boardId, key }, key !== "");
 export const useThreadTicket = (threadId: string) => useLiveQuery("thread.ticket", { threadId });
@@ -59,13 +61,14 @@ export function useDecisionBadge(): ExperimentalBadge | null {
 
 /**
  * Where the board page is: `""` (the first board, or Start), `new`,
- * `<boardId>`, `<boardId>/settings` or `<boardId>/<ticket key>`.
+ * `<boardId>`, `<boardId>/settings`, `<boardId>/done` or `<boardId>/<ticket key>`.
  */
 export type Route =
   | { kind: "home" }
   | { kind: "start" }
   | { kind: "board"; boardId: number }
   | { kind: "settings"; boardId: number }
+  | { kind: "done"; boardId: number }
   | { kind: "ticket"; boardId: number; key: string }
   | { kind: "plan"; boardId: number; key: string; round: number | null };
 
@@ -76,6 +79,7 @@ export function parseRoute(subPath: string): Route {
   const boardId = Number(first);
   if (!Number.isInteger(boardId) || boardId < 1) return { kind: "home" };
   if (second === "settings") return { kind: "settings", boardId };
+  if (second === "done") return { kind: "done", boardId };
   if (second !== "" && third === "plan") {
     const round = Number(fourth);
     return { kind: "plan", boardId, key: second, round: Number.isInteger(round) && round > 0 ? round : null };
@@ -97,10 +101,28 @@ export function useGo() {
     board: (boardId: number) => to(String(boardId)),
     ticket: (boardId: number, key: string) => to(`${boardId}/${encodeURIComponent(key)}`),
     settings: (boardId: number) => to(`${boardId}/settings`),
+    done: (boardId: number) => to(`${boardId}/done`),
     plan: (boardId: number, key: string, round?: number) =>
       to(`${boardId}/${encodeURIComponent(key)}/plan${round ? `/${round}` : ""}`),
     start: () => to("new"),
   };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** A Done ticket stays on the board for the board's recent window, unless its threads are archived. */
+export function onBoard(ticket: Ticket, recentDays: number, now = Date.now()): boolean {
+  if (ticket.stage !== "done") return true;
+  if (ticket.archive?.state === "archived") return false;
+  return now - (ticket.doneAt ?? now) < recentDays * DAY_MS;
+}
+
+/** What happened to a Done ticket's threads, for cards and the Done list. */
+export function archiveLabel(ticket: Ticket): string | null {
+  const archive = ticket.archive;
+  if (!archive) return null;
+  if (archive.state === "kept") return `kept: ${archive.reason}`;
+  return archive.state === "archived" ? "Archived" : "Unarchived";
 }
 
 export function useOpenTicket() {

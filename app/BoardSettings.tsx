@@ -7,7 +7,7 @@ import { rpcContract } from "../src/contract";
 import { agentInstructions, INSTRUCTIONS_LIMIT, RULES, type BoardOptions, type RuleId } from "../src/options";
 import { errorText, useBoards, useGo } from "./hooks";
 
-type TextField = Exclude<keyof BoardOptions, "rules" | "extraRules">;
+type TextField = Exclude<keyof BoardOptions, "rules" | "extraRules" | "archiveDoneThreads" | "doneRecentDays">;
 
 const FIELDS: { key: TextField; label: string; hint: string; placeholder?: string }[] = [
   { key: "userName", label: "Your name for agents", hint: "How agents refer to you in questions and messages." },
@@ -93,6 +93,35 @@ export function BoardSettings({ boardId }: { boardId: number }) {
           />
         </Field>
       ))}
+
+      <section className="space-y-3" aria-label="Done tickets">
+        <h2 className="text-sm font-semibold">Done tickets</h2>
+        <Field label="Days on the board" hint="Done tickets stay on the board this long; then they move to the Done list.">
+          <Input
+            type="number"
+            min={0}
+            max={365}
+            value={options.doneRecentDays}
+            onChange={(event) => set({ doneRecentDays: Math.max(0, Math.min(365, Math.trunc(Number(event.target.value) || 0))) })}
+            className="w-24"
+          />
+        </Field>
+        <label className="flex gap-3 text-sm">
+          <Checkbox
+            checked={options.archiveDoneThreads}
+            onCheckedChange={(checked) => set({ archiveDoneThreads: checked === true })}
+            aria-label="Archive a ticket's threads when it's Done"
+            className="mt-0.5"
+          />
+          <span>
+            <span className="font-medium">Archive a ticket's threads when it's Done</span>
+            <span className="block text-muted-foreground">
+              Once no PR is open, the agents are idle, nothing waits on you and every worktree is clean and pushed. bb
+              may then remove the worktree folders; Unarchive on the ticket brings them back.
+            </span>
+          </span>
+        </label>
+      </section>
 
       <section className="space-y-3" aria-label="Agent rules">
         <div>

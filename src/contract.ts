@@ -86,6 +86,19 @@ export const planMarkSchema = z.object({
 });
 export type PlanMark = z.infer<typeof planMarkSchema>;
 
+/**
+ * A Done ticket's threads: archived (by the board or by hand), kept with the
+ * reason the board would not archive them yet, or unarchived by the user,
+ * after which the board leaves them alone.
+ */
+export const ticketArchiveSchema = z.object({
+  state: z.enum(["archived", "kept", "unarchived"]),
+  reason: z.string().nullable(),
+  threadIds: z.array(z.string()),
+  at: z.number(),
+});
+export type TicketArchive = z.infer<typeof ticketArchiveSchema>;
+
 export const ticketSchema = z.object({
   boardId: z.number().int(),
   key: z.string(),
@@ -116,6 +129,9 @@ export const ticketSchema = z.object({
     .nullable(),
   openDecisions: z.number().int(),
   blockingDecisions: z.number().int(),
+  /** When the board first saw the ticket Done; null while it is not Done. */
+  doneAt: z.number().nullable(),
+  archive: ticketArchiveSchema.nullable(),
   updatedAt: z.number(),
 });
 export type Ticket = z.infer<typeof ticketSchema>;
@@ -144,7 +160,8 @@ export const decisionSchema = z.object({
 export type Decision = z.infer<typeof decisionSchema>;
 
 export const stageEventSchema = z.object({
-  /** Null for a report that only changed PRs, milestone or the note. */
+  kind: z.enum(["stage", "archived", "unarchived"]),
+  /** Null for a report that only changed PRs, milestone or the note, and for archive entries. */
   stage: stageSchema.nullable(),
   note: z.string().nullable(),
   threadId: z.string().nullable(),
@@ -270,8 +287,19 @@ export const rpcContract = defineRpcContract({
     output: z.object({ detail: ticketDetailSchema.nullable() }),
   },
   "board.refresh": { input: boardIdInput, output: boardSchema },
+  "ticket.unarchive": {
+    input: z.object({ boardId: z.number().int().positive(), key: z.string().min(1).max(40) }).strict(),
+    output: z.object({ ticket: ticketSchema }),
+  },
   "decisions.list": {
-    input: z.object({ status: z.enum(["open", "all"]), boardId: z.number().int().positive().optional() }).strict(),
+    input: z
+      .object({
+        status: z.enum(["open", "all"]),
+        boardId: z.number().int().positive().optional(),
+        /** Done tickets' open decisions are left out unless asked for. */
+        includeDone: z.boolean().optional(),
+      })
+      .strict(),
     output: z.object({ decisions: z.array(decisionSchema) }),
   },
   "decisions.answer": {

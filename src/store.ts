@@ -9,6 +9,7 @@ import type {
   Stage,
   StageEvent,
   Ticket,
+  TicketArchive,
 } from "./contract";
 import { boardOptionsSchema, type BoardOptions } from "./options";
 
@@ -112,6 +113,17 @@ export const MIGRATIONS = [
     updated_at INTEGER NOT NULL
   )`,
   `ALTER TABLE tickets ADD COLUMN linear_state_type TEXT`,
+  `ALTER TABLE tickets ADD COLUMN done_at INTEGER`,
+  // The latest archive state per ticket; history goes to stage_events.
+  `CREATE TABLE ticket_archives (
+    board_id INTEGER NOT NULL,
+    ticket_key TEXT NOT NULL,
+    state TEXT NOT NULL,
+    reason TEXT,
+    thread_ids_json TEXT NOT NULL DEFAULT '[]',
+    at INTEGER NOT NULL,
+    PRIMARY KEY (board_id, ticket_key)
+  )`,
 ];
 
 export interface BoardRecord {
@@ -181,6 +193,7 @@ interface TicketRow {
   linear_issue_id: string | null;
   linear_state: string | null;
   linear_state_type: string | null;
+  done_at: number | null;
   lead_thread_id: string;
   environment_id: string | null;
   branch: string | null;
@@ -634,6 +647,59 @@ export class BoardStore {
     })();
   }
 
+  /** Records the first time the board sees the ticket Done, or clears it when the ticket leaves Done. */
+  setDone(ticketKey: string, done: boolean, note: string | null): void {
+    const row = this.row(ticketKey);
+    if (!row || (row.done_at !== null) === done) return;
+    const at = this.now();
+    this.db.transaction(() => {
+      // A Done report already sits in the history; only an inferred Done gets an entry.
+      const reportedAt = done && row.reported_stage === "done" ? row.reported_at : null;
+      this.db
+        .prepare(`UPDATE tickets SET done_at = ? WHERE board_id = ? AND key = ?`)
+        .run(done ? (reportedAt ?? at) : null, this.boardId, ticketKey);
+      if (done && reportedAt === null) this.addEvent(ticketKey, "done", note, at);
+    })();
+  }
+
+  archiveState(ticketKey: string): TicketArchive | null {
+    const row = this.db
+      .prepare(`SELECT state, reason, thread_ids_json, at FROM ticket_archives WHERE board_id = ? AND ticket_key = ?`)
+      .get(this.boardId, ticketKey) as
+      | { state: TicketArchive["state"]; reason: string | null; thread_ids_json: string; at: number }
+      | undefined;
+    return row ? { state: row.state, reason: row.reason, threadIds: JSON.parse(row.thread_ids_json), at: row.at } : null;
+  }
+
+  /** Saves the archive state; archived and unarchived also go into the ticket's history. */
+  setArchiveState(
+    ticketKey: string,
+    state: TicketArchive["state"],
+    reason: string | null,
+    threadIds: string[],
+    note: string | null = null,
+    at = this.now(),
+  ): void {
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO ticket_archives (board_id, ticket_key, state, reason, thread_ids_json, at) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(board_id, ticket_key) DO UPDATE SET state = excluded.state, reason = excluded.reason,
+             thread_ids_json = excluded.thread_ids_json,
+             at = CASE WHEN ticket_archives.state IS excluded.state AND ticket_archives.reason IS excluded.reason
+               THEN ticket_archives.at ELSE excluded.at END`,
+        )
+        .run(this.boardId, ticketKey, state, reason, JSON.stringify(threadIds), at);
+      if (state !== "kept") this.addEvent(ticketKey, state, note, at);
+    })();
+  }
+
+  private addEvent(ticketKey: string, stage: string, note: string | null, at: number): void {
+    this.db
+      .prepare(`INSERT INTO stage_events (board_id, ticket_key, stage, note, thread_id, at) VALUES (?, ?, ?, ?, NULL, ?)`)
+      .run(this.boardId, ticketKey, stage, note, at);
+  }
+
   stageEvents(ticketKey: string): StageEvent[] {
     return (
       this.db
@@ -643,7 +709,8 @@ export class BoardStore {
         )
         .all(this.boardId, ticketKey) as { stage: string; note: string | null; thread_id: string | null; at: number }[]
     ).map((row) => ({
-      stage: row.stage === "note" ? null : (row.stage as Stage),
+      kind: row.stage === "archived" || row.stage === "unarchived" ? row.stage : "stage",
+      stage: row.stage === "note" || row.stage === "archived" || row.stage === "unarchived" ? null : (row.stage as Stage),
       note: row.note,
       threadId: row.thread_id,
       at: row.at,
@@ -758,6 +825,8 @@ export class BoardStore {
       openReview: null,
       openDecisions: counts.open,
       blockingDecisions: counts.blocking,
+      doneAt: row.done_at,
+      archive: this.archiveState(row.key),
       updatedAt: row.updated_at,
     };
   }

@@ -50,6 +50,10 @@ export const boardOptionsSchema = z.object({
   rules: rulesSchema,
   /** Free text added to every ticket agent's instructions on this board. */
   extraRules: z.string().max(3000).default(""),
+  /** Archive a Done ticket's lead and implementer threads once it is safe to. */
+  archiveDoneThreads: z.boolean().default(false),
+  /** Days a Done ticket stays on the board; older and archived ones live in the Done list. */
+  doneRecentDays: z.number().int().min(0).max(365).default(3),
 });
 export type BoardOptions = z.infer<typeof boardOptionsSchema>;
 

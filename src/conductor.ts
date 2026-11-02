@@ -205,8 +205,18 @@ export class Conductor {
     return this.engine(link.boardId).threadView(threadId);
   }
 
-  decisions(status: "open" | "all", boardId?: number): Decision[] {
-    return this.store.listDecisions({ ...(status === "open" ? { status: "open" as const } : {}), boardId });
+  decisions(status: "open" | "all", boardId?: number, includeDone = false): Decision[] {
+    const decisions = this.store.listDecisions({ ...(status === "open" ? { status: "open" as const } : {}), boardId });
+    return includeDone || status === "all" ? decisions : decisions.filter(this.notDone());
+  }
+
+  /** Done tickets no longer wait on the user: their decisions and rounds leave the inbox and the badge. */
+  private notDone(): (item: { boardId: number; ticketKey: string }) => boolean {
+    const done = new Map<number, Set<string>>();
+    return ({ boardId, ticketKey }) => {
+      if (!done.has(boardId)) done.set(boardId, this.store.getBoard(boardId) ? this.engine(boardId).doneKeys() : new Set());
+      return !done.get(boardId)!.has(ticketKey);
+    };
   }
 
   async answer(id: number, choice: string, note: string | null): Promise<Decision> {
@@ -252,7 +262,11 @@ export class Conductor {
   }
 
   plansWaiting(): PlanRound[] {
-    return this.store.waitingRounds();
+    return this.store.waitingRounds().filter(this.notDone());
+  }
+
+  unarchive(boardId: number, key: string): Promise<Ticket> {
+    return this.engine(boardId).unarchive(key.trim().toUpperCase());
   }
 
   planRounds(boardId: number, key: string): PlanRound[] {

@@ -7,6 +7,8 @@ import { useOpenAgentThread, useOpenOrchestratorTab } from "./AgentTabs";
 import { DecisionCard } from "./DecisionCard";
 import {
   STAGE_HINTS,
+  archiveLabel,
+  onBoard,
   stageLabel,
   WAITS_ON_YOU,
   ago,
@@ -22,10 +24,14 @@ import {
 const PIPELINE = STAGES.filter((stage) => stage !== "paused");
 
 export function Overview({ board, decisions }: { board: Board; decisions: Decision[] }) {
+  const go = useGo();
   const [milestone, setMilestone] = useState<string>("all");
   const milestones = [...new Set(board.tickets.map((t) => t.milestone).filter((m): m is string => m !== null))].sort();
-  const shown = board.tickets.filter((t) => milestone === "all" || t.milestone === milestone);
+  const inMilestone = board.tickets.filter((t) => milestone === "all" || t.milestone === milestone);
+  const recentDays = board.board.options.doneRecentDays;
+  const shown = inMilestone.filter((t) => onBoard(t, recentDays));
   const byStage = (stage: Stage) => sortCards(shown.filter((t) => t.stage === stage));
+  const doneTotal = inMilestone.filter((t) => t.stage === "done").length;
   const milestonesOn = board.board.options.milestonePattern.trim() !== "" || milestones.length > 0;
 
   return (
@@ -71,6 +77,7 @@ export function Overview({ board, decisions }: { board: Board; decisions: Decisi
             marker={String(i + 1)}
             tickets={byStage(stage)}
             milestones={milestonesOn}
+            {...(stage === "done" ? { total: doneTotal, onShowAll: () => go.done(board.board.id) } : {})}
           />
         ))}
         <div className="mt-4 border-t border-dashed border-border pt-3">
@@ -102,10 +109,11 @@ function OrchestratorBand({ board }: { board: Board }) {
   const others = useOtherChildren(id, leadIds);
   if (!id) return null;
   const me = presence(id);
-  const running = board.tickets.filter((t) =>
+  const active = board.tickets.filter((t) => t.stage !== "done");
+  const running = active.filter((t) =>
     [t.leadThreadId, ...t.implementerThreadIds].some((tid) => presence(tid).running),
   ).length;
-  const milestones = [...new Set(board.tickets.map((t) => t.milestone).filter(Boolean))].sort().join(" and ");
+  const milestones = [...new Set(active.map((t) => t.milestone).filter(Boolean))].sort().join(" and ");
 
   return (
     <div className="grid gap-y-2 border-b border-border px-4 py-4">
@@ -123,7 +131,8 @@ function OrchestratorBand({ board }: { board: Board }) {
         </div>
       </div>
       <p className="text-sm text-muted-foreground">
-        {board.tickets.length} tickets{milestones ? ` across ${milestones}` : ""}, {running} with an agent running.
+        {active.length} open tickets{milestones ? ` across ${milestones}` : ""}, {running} with an agent running.
+        {board.tickets.length > active.length && ` ${board.tickets.length - active.length} done.`}
       </p>
       {others.length > 0 && (
         <p className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
@@ -293,17 +302,30 @@ function StageSection({
   tickets,
   milestones,
   aside = false,
+  total,
+  onShowAll,
 }: {
   stage: Stage;
   marker: string;
   tickets: Ticket[];
   milestones: boolean;
   aside?: boolean;
+  /** Done only: every Done ticket, of which the board shows the recent ones. */
+  total?: number;
+  onShowAll?: () => void;
 }) {
   const label = stageLabel(stage, milestones);
-  const hint = stage === "in-milestone" && !milestones ? "merged into its base branch" : STAGE_HINTS[stage];
+  const hidden = (total ?? tickets.length) - tickets.length;
+  const hint =
+    stage === "in-milestone" && !milestones
+      ? "merged into its base branch"
+      : hidden > 0
+        ? tickets.length > 0
+          ? "finished recently"
+          : "nothing finished recently"
+        : STAGE_HINTS[stage];
   const yours = WAITS_ON_YOU.has(stage);
-  const empty = tickets.length === 0;
+  const empty = tickets.length === 0 && hidden === 0;
   return (
     <section aria-label={label} className="relative grid grid-cols-[56px_minmax(0,1fr)] py-1.5">
       <div
@@ -327,12 +349,17 @@ function StageSection({
           >
             {label}
           </h3>
-          {!empty && <span className="text-muted-foreground">{tickets.length}</span>}
+          {!empty && <span className="text-muted-foreground">{total ?? tickets.length}</span>}
           <span className={cn("text-xs text-muted-foreground", yours && "text-[var(--brand,var(--attention))]")}>
             {empty ? (yours ? "waits on you, nothing now" : "nothing here") : hint}
           </span>
+          {onShowAll && (total ?? 0) > 0 && (
+            <button type="button" className="ml-auto text-xs text-muted-foreground hover:underline" onClick={onShowAll}>
+              All {total} done tickets →
+            </button>
+          )}
         </div>
-        {!empty && (
+        {tickets.length > 0 && (
           <div className="mb-3.5 mt-2 grid grid-cols-1 gap-2.5 md:grid-cols-[repeat(auto-fill,minmax(330px,1fr))]">
             {tickets.map((t) => (
               <TicketCard key={t.key} ticket={t} />
@@ -389,6 +416,9 @@ function TicketCard({ ticket }: { ticket: Ticket }) {
       </div>
       {ticket.prs.length > 0 && <PrStack prs={ticket.prs} />}
       <CardNote ticket={ticket} />
+      {ticket.stage === "done" && archiveLabel(ticket) && (
+        <p className="text-xs text-muted-foreground">{archiveLabel(ticket)}</p>
+      )}
       {ticket.sharedWith.length > 0 && (
         <p className="text-xs text-muted-foreground">Same agents as {ticket.sharedWith.join(", ")}.</p>
       )}

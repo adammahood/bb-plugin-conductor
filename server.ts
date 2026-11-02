@@ -133,7 +133,8 @@ function parseDecisionId(raw: string): number {
 
 function formatTicket(t: Ticket): string {
   const waiting = t.openDecisions > 0 ? `  [${t.openDecisions} decision${t.openDecisions > 1 ? "s" : ""}]` : "";
-  return `${t.key.padEnd(9)} ${t.stage.padEnd(12)} ${(t.repo ?? "-").padEnd(32)} ${t.title}${waiting}`;
+  const archive = t.archive ? `  [${t.archive.state === "kept" ? `kept: ${t.archive.reason}` : t.archive.state}]` : "";
+  return `${t.key.padEnd(9)} ${t.stage.padEnd(12)} ${(t.repo ?? "-").padEnd(32)} ${t.title}${waiting}${archive}`;
 }
 
 function formatDecision(d: Decision): string {
@@ -191,7 +192,8 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
       await conductor.engine(boardId).sweep();
       return conductor.engine(boardId).board();
     },
-    "decisions.list": ({ status, boardId }) => ({ decisions: conductor.decisions(status, boardId) }),
+    "decisions.list": ({ status, boardId, includeDone }) => ({ decisions: conductor.decisions(status, boardId, includeDone) }),
+    "ticket.unarchive": async ({ boardId, key }) => ({ ticket: await conductor.unarchive(boardId, key) }),
     "decisions.answer": ({ id, choice, note }) => conductor.answer(id, choice, note || null),
     "decisions.withdraw": ({ id, note }) => conductor.withdraw(id, note || null),
     "decisions.retryDelivery": ({ id }) => conductor.retryDelivery(id),
@@ -318,10 +320,18 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
       summary: "Conductor: boards of ticket agents, with a decision inbox",
       commands: {
         tickets: cliCommand({
-          summary: "List a board's tickets",
-          options: { ...boardOption, json: { type: "boolean", description: "Print JSON" } },
+          summary: "List a board's tickets that are not Done (--done for Done ones, --all for both)",
+          options: {
+            ...boardOption,
+            done: { type: "boolean", description: "Only Done tickets" },
+            all: { type: "boolean", description: "Every ticket" },
+            json: { type: "boolean", description: "Print JSON" },
+          },
           async run({ options }) {
-            const { tickets } = conductor.engine(boardOf(options.board)).board();
+            const tickets = conductor
+              .engine(boardOf(options.board))
+              .board()
+              .tickets.filter((t) => options.all || (t.stage === "done") === Boolean(options.done));
             if (options.json) return { exitCode: 0, stdout: JSON.stringify(tickets) };
             return { exitCode: 0, stdout: tickets.length ? tickets.map(formatTicket).join("\n") : "No tickets." };
           },
@@ -342,7 +352,7 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
             json: { type: "boolean", description: "Print JSON" },
           },
           async run({ options }) {
-            const decisions = conductor.decisions(options.all ? "all" : "open", options.board);
+            const decisions = conductor.decisions(options.all ? "all" : "open", options.board, true);
             if (options.json) return { exitCode: 0, stdout: JSON.stringify(decisions) };
             return { exitCode: 0, stdout: decisions.length ? decisions.map(formatDecision).join("\n") : "No decisions." };
           },
@@ -368,6 +378,15 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
           async run({ positionals, options }) {
             const decision = await conductor.withdraw(parseDecisionId(positionals.id as string), options.note ?? null);
             return { exitCode: 0, stdout: `${decision.ref} withdrawn.` };
+          },
+        }),
+        unarchive: cliCommand({
+          summary: "Unarchive a Done ticket's threads; the board then leaves them alone",
+          positionals: [{ name: "ticket", description: "Ticket key, e.g. ABC-123", required: true }],
+          options: boardOption,
+          async run({ positionals, options }) {
+            const ticket = await conductor.unarchive(boardOf(options.board), positionals.ticket as string);
+            return { exitCode: 0, stdout: `${ticket.key}: ${ticket.archive?.state ?? "not archived"}.` };
           },
         }),
         report: cliCommand({
@@ -495,6 +514,12 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
             "github-owner": { type: "string", description: "Owner for PR links built from repo#n" },
             "user-name": { type: "string", description: "How agents refer to you" },
             "extra-rules": { type: "string", stdin: true, description: "Free-text agent rules (max 3000 chars)" },
+            "archive-done-threads": {
+              type: "enum",
+              values: ["on", "off"],
+              description: "Archive a ticket's threads when it's Done",
+            },
+            "done-recent-days": { type: "string", description: "Days a Done ticket stays on the board (0 to 365)" },
             on: { type: "enum", values: [...RULE_IDS], repeatable: true, description: "Turn rule switches on" },
             off: { type: "enum", values: [...RULE_IDS], repeatable: true, description: "Turn rule switches off" },
           },
@@ -509,6 +534,8 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
               const value = (options as Record<string, unknown>)[flag];
               if (typeof value === "string") Object.assign(patch, { [key]: value });
             }
+            if (options["archive-done-threads"]) patch.archiveDoneThreads = options["archive-done-threads"] === "on";
+            if (options["done-recent-days"] !== undefined) patch.doneRecentDays = Number(options["done-recent-days"]);
             const board = await conductor.updateBoard(Number(positionals.id), { name: options.name, options: patch });
             return { exitCode: 0, stdout: JSON.stringify(board, null, 2) };
           },

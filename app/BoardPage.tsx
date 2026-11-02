@@ -16,8 +16,10 @@ import { useOpenAgentThread, useOrchestratorTabOnFirstVisit } from "./AgentTabs"
 import { DecisionCard } from "./DecisionCard";
 import { Overview } from "./Overview";
 import { BoardSettings } from "./BoardSettings";
+import { DoneList } from "./DoneList";
 import {
   STAGE_LABELS,
+  archiveLabel,
   errorText,
   formatTime,
   parseRoute,
@@ -70,6 +72,7 @@ export function BoardPage({ subPath }: PluginNavPanelProps) {
   else if (route.kind === "start" || (route.kind === "home" && list!.length === 0)) body = <StartBoard />;
   else if (boardId === null || !list!.some((b) => b.id === boardId)) body = <Empty>That board no longer exists.</Empty>;
   else if (route.kind === "settings") body = <BoardSettings boardId={boardId} />;
+  else if (route.kind === "done") body = <DoneList boardId={boardId} />;
   else if (route.kind === "ticket") body = <TicketView boardId={boardId} ticketKey={route.key} />;
   else if (route.kind === "plan") body = <PlanReview boardId={boardId} ticketKey={route.key} roundN={route.round} />;
   else body = <OverviewPage boardId={boardId} />;
@@ -135,9 +138,9 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
         <button
           type="button"
           className="text-xs text-muted-foreground hover:underline"
-          onClick={() => go.board(boardId)}
+          onClick={() => (ticket.stage === "done" ? go.done(boardId) : go.board(boardId))}
         >
-          ← All tickets
+          {ticket.stage === "done" ? "← Done tickets" : "← All tickets"}
         </button>
         <h1 className="text-lg font-semibold">
           {ticket.key} {shortTitle(ticket.title)}
@@ -155,6 +158,7 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
           <span className="text-foreground">{STAGE_LABELS[ticket.stage]}</span>
           {ticket.stageNote && <span>“{ticket.stageNote}”</span>}
         </p>
+        {ticket.stage === "done" && <ArchiveLine boardId={boardId} ticket={ticket} />}
         <div className="flex flex-wrap gap-2">
           {ticket.linearUrl && (
             <Button asChild size="sm" variant="outline">
@@ -251,7 +255,9 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
             {stageEvents.map((e, i) => (
               <li key={i} className="flex gap-3">
                 <span className="w-32 shrink-0 text-muted-foreground">{formatTime(e.at)}</span>
-                <span className="w-28 shrink-0">{e.stage ? STAGE_LABELS[e.stage] : "Update"}</span>
+                <span className="w-28 shrink-0">
+                  {e.kind === "archived" ? "Archived" : e.kind === "unarchived" ? "Unarchived" : e.stage ? STAGE_LABELS[e.stage] : "Update"}
+                </span>
                 <span className="text-muted-foreground">{e.note}</span>
               </li>
             ))}
@@ -259,6 +265,31 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
         )}
       </Section>
     </>
+  );
+}
+
+function ArchiveLine({ boardId, ticket }: { boardId: number; ticket: Ticket }) {
+  const unarchive = useRpcMutation({ contract: rpcContract, method: "ticket.unarchive" });
+  const label = archiveLabel(ticket);
+  if (!label) return null;
+  return (
+    <p className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+      <span>
+        Threads: {label}
+        {ticket.archive?.state === "archived" && ` ${formatTime(ticket.archive.at)}`}
+      </span>
+      {ticket.archive?.state === "archived" && (
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={unarchive.isPending}
+          onClick={() => void unarchive.mutate({ boardId, key: ticket.key }).catch(() => {})}
+        >
+          {unarchive.isPending ? "Unarchiving…" : "Unarchive"}
+        </Button>
+      )}
+      {unarchive.error && <span className="text-destructive">{errorText(unarchive.error)}</span>}
+    </p>
   );
 }
 
