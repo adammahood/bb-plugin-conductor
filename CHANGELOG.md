@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+- Tickets move from In milestone to Done once their merged PRs reach the default branch: the milestone's release PR merged after them, or the milestone branch is an ancestor of the default branch. Needs `gh` logged in on the bb server.
+- Tickets are Done when Linear has the issue in a completed state, even with a held or draft PR left open.
+- Held and closed PRs no longer keep a ticket out of In milestone.
+- Linear state is read on every sweep, also for tickets without a thread binding of their own.
+
 ## 0.3.0
 
 - Plan review: `conductor_submit_plan`, a review page with comment, remove and replace marks, approve (with notes) or request changes, round history and a diff between revisions.
