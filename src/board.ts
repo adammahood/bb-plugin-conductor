@@ -544,8 +544,7 @@ export class BoardEngine {
       });
     }
     for (const threadId of ids) {
-      const thread = (await this.bb.sdk.threads.get({ threadId }).catch(() => null)) as { canRestoreEnvironment?: boolean } | null;
-      if (!thread?.canRestoreEnvironment) continue;
+      if (!(await this.restorable(threadId))) continue;
       await this.bb.sdk.threads.restoreEnvironment({ threadId }).then(
         () => (restored += 1),
         (error: unknown) => this.bb.log.warn(`restore ${threadId}: ${String(error).slice(0, 300)}`),
@@ -556,6 +555,30 @@ export class BoardEngine {
     await this.refreshFacts();
     this.changed();
     return this.withStage(this.store.getTicket(key)!);
+  }
+
+  /**
+   * Whether bb removed the thread's worktree and can rebuild it. bb sets
+   * `canRestoreEnvironment` a moment after unarchiving, so a removed worktree
+   * is waited on briefly.
+   */
+  private async restorable(threadId: string): Promise<boolean> {
+    const read = async () =>
+      (await this.bb.sdk.threads.get({ threadId }).catch(() => null)) as {
+        environmentId?: string | null;
+        canRestoreEnvironment?: boolean;
+      } | null;
+    let thread = await read();
+    if (!thread?.environmentId) return false;
+    const env = (await this.bb.sdk.environments.get({ environmentId: thread.environmentId }).catch(() => null)) as {
+      status?: string;
+    } | null;
+    if (env?.status !== "destroyed") return false;
+    for (let i = 0; i < 20 && !thread?.canRestoreEnvironment; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      thread = await read();
+    }
+    return thread?.canRestoreEnvironment === true;
   }
 
   summary(): BoardSummary {

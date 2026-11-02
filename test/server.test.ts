@@ -85,6 +85,7 @@ async function setup(
   const metadata = new Map<string, Record<string, unknown>>();
   const sent: { threadId: string; text: string; originPluginId?: string; mode: string }[] = [];
   const calls: { archive: string[]; unarchive: string[]; restore: string[] } = { archive: [], unarchive: [], restore: [] };
+  const gets: Record<string, number> = {};
   const allThreads = () => Object.values(world.children).flat();
   const setArchived = (threadId: string, at: number | null): string[] => {
     const thread = allThreads().find((t) => t.id === threadId);
@@ -103,7 +104,8 @@ async function setup(
           id: threadId,
           title: threadId === ORCH ? "Orchestrator" : threadId,
           environmentId: `env_${threadId}`,
-          canRestoreEnvironment: world.removed.includes(threadId),
+          // bb sets the flag a moment after unarchiving.
+          canRestoreEnvironment: world.removed.includes(threadId) && (gets[threadId] = (gets[threadId] ?? 0) + 1) > 1,
         }),
         archive: async ({ threadId }: { threadId: string }) => {
           calls.archive.push(threadId);
@@ -193,6 +195,7 @@ async function setup(
           branchName: `bb/${environmentId}`,
           mergeBaseBranch: environmentId === "env_thr_lead2" ? "origin/m4-avatars" : "origin/abc-103-api-route",
           baseBranch: null,
+          status: world.removed.some((id) => `env_${id}` === environmentId) ? "destroyed" : "ready",
         }),
       },
       plugins: {
