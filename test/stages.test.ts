@@ -19,6 +19,8 @@ const facts = (overrides: Partial<StageFacts> = {}): StageFacts => ({
   reportedAfterReview: false,
   planRound: null,
   agentRunning: false,
+  trackerDone: false,
+  landed: false,
   ...overrides,
 });
 
@@ -96,6 +98,26 @@ describe("decideStage", () => {
 
   it("ends a reported plan review when its round is decided", () => {
     expect(decideStage(facts({ reported: "plan-review", planRound: "approved" })).stage).toBe("building");
+  });
+
+  it("moves merged work to Done once its milestone has reached the default branch", () => {
+    expect(decideStage(facts({ prs: [pr(55, "merged")], landed: true }))).toMatchObject({ stage: "done", source: "inferred" });
+    expect(decideStage(facts({ reported: "in-milestone", prs: [pr(55, "merged")], landed: true })).stage).toBe("done");
+    expect(decideStage(facts({ prs: [pr(55, "merged"), pr(56, "draft")], landed: true })).stage).toBe("draft-pr");
+  });
+
+  it("leaves held and closed PRs out of the merged check", () => {
+    expect(decideStage(facts({ prs: [pr(56, "merged"), pr(57, "held")] })).stage).toBe("in-milestone");
+    expect(decideStage(facts({ prs: [pr(56, "merged"), pr(57, "closed")], landed: true })).stage).toBe("done");
+    expect(decideStage(facts({ prs: [pr(57, "held")] })).stage).toBe("draft-pr");
+  });
+
+  it("is Done when the tracker says so, unless something waits on the user or the ticket is paused", () => {
+    const done = facts({ trackerDone: true, prs: [pr(56, "merged"), pr(57, "draft")], reported: "in-review" });
+    expect(decideStage(done)).toMatchObject({ stage: "done", source: "inferred" });
+    expect(decideStage({ ...done, reviewRound: "needs-review" }).stage).toBe("code-review");
+    expect(decideStage({ ...done, planRound: "open" }).stage).toBe("plan-review");
+    expect(decideStage({ ...done, reported: "paused" }).stage).toBe("paused");
   });
 });
 

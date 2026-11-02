@@ -69,6 +69,7 @@ update can break parts of it; each surface fails on its own.
 | [Linear](https://github.com/vburojevic/bb-plugin-linear) | Ticket keys from issue bindings, issue state, description and relations |
 | Code Review Workspace | Review rounds waiting on you; Code review stage |
 | GitHub PR Status (bundled) | The PR of each ticket's branch |
+| `gh` CLI, logged in | Done once a milestone is released |
 
 Without them the board works from thread titles and what agents report.
 
@@ -79,12 +80,15 @@ The first rule that matches wins:
 1. **Paused** when an agent reports it.
 2. **Code review** while a Code Review Workspace round waits on you;
    **Building** once you sent comments back, until the agent reports again.
-3. **In review** when a PR is open for review; **In milestone** when all PRs
-   are merged.
-4. The stage the agent **reported**, if any.
-5. **Plan review** when a plan file for the ticket waits on you (needs a plans
-   folder).
-6. **Draft PRs**, **Building** (an agent is running) or **Planning** from the
+3. **Plan review** while a plan round waits on you.
+4. **Done** when Linear has the issue in a completed state.
+5. **In review** when a PR is open for review; **In milestone** when all PRs
+   are merged; **Done** once those PRs have reached the default branch: merged
+   straight into it, or their base branch merged into it by a later release
+   PR or as an ancestor. Held and closed PRs are left out. GitHub is asked
+   through `gh` on the bb server.
+6. The stage the agent **reported**, if any.
+7. **Draft PRs**, **Building** (an agent is running) or **Planning** from the
    facts.
 
 ## CLI

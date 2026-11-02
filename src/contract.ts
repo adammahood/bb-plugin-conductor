@@ -94,6 +94,7 @@ export const ticketSchema = z.object({
   projectId: z.string().nullable(),
   linearUrl: z.string().nullable(),
   linearState: z.string().nullable(),
+  linearStateType: z.string().nullable(),
   leadThreadId: z.string(),
   implementerThreadIds: z.array(z.string()),
   environmentId: z.string().nullable(),

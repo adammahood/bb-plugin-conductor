@@ -10,6 +10,8 @@ export interface LinearBinding {
   identifier: string;
   title: string;
   stateName: string | null;
+  /** Linear's workflow state type, e.g. completed. */
+  stateType: string | null;
   url: string | null;
 }
 
@@ -23,6 +25,7 @@ const bindingsSchema = z.object({
           identifier: z.string(),
           title: z.string(),
           stateName: z.string().nullable().catch(null),
+          tone: z.string().nullable().optional().catch(null),
           url: z.string().nullable().catch(null),
         })
         .nullable()
@@ -48,7 +51,10 @@ export async function linearBindings(
       outputSchema: bindingsSchema,
     });
     for (const [threadId, row] of Object.entries(result.threads)) {
-      if (row.binding) out.set(threadId, row.binding);
+      if (row.binding) {
+        const { tone, ...binding } = row.binding;
+        out.set(threadId, { ...binding, stateType: tone ?? null });
+      }
     }
   }
   return out;
@@ -149,6 +155,7 @@ const resolvedSchema = z.object({
       identifier: z.string(),
       title: z.string(),
       stateName: z.string().nullable().catch(null),
+      tone: z.string().nullable().optional().catch(null),
       url: z.string().nullable().optional().catch(null),
     }),
   ),
@@ -175,6 +182,7 @@ export async function linearResolve(
         identifier: issue.identifier,
         title: issue.title,
         stateName: issue.stateName,
+        stateType: issue.tone ?? null,
         url: issue.url ?? null,
       });
     }

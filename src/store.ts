@@ -111,6 +111,7 @@ export const MIGRATIONS = [
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   )`,
+  `ALTER TABLE tickets ADD COLUMN linear_state_type TEXT`,
 ];
 
 export interface BoardRecord {
@@ -132,6 +133,8 @@ export interface DiscoveredTicket {
   linearUrl: string | null;
   linearIssueId: string | null;
   linearState: string | null;
+  /** Linear's workflow state type: backlog, unstarted, started, completed or canceled. */
+  linearStateType: string | null;
   leadThreadId: string;
   environmentId: string | null;
   branch: string | null;
@@ -177,6 +180,7 @@ interface TicketRow {
   linear_url: string | null;
   linear_issue_id: string | null;
   linear_state: string | null;
+  linear_state_type: string | null;
   lead_thread_id: string;
   environment_id: string | null;
   branch: string | null;
@@ -468,18 +472,20 @@ export class BoardStore {
       this.db
         .prepare(
           `INSERT INTO tickets (board_id, key, title, repo, project_id, linear_url, linear_issue_id,
-             linear_state, lead_thread_id, environment_id, branch, base, updated_at)
+             linear_state, linear_state_type, lead_thread_id, environment_id, branch, base, updated_at)
            VALUES (@boardId, @key, @title, @repo, @projectId, @linearUrl, @linearIssueId,
-             @linearState, @leadThreadId, @environmentId, @branch, @base, @at)
+             @linearState, @linearStateType, @leadThreadId, @environmentId, @branch, @base, @at)
            ON CONFLICT(board_id, key) DO UPDATE SET
              title = excluded.title, repo = excluded.repo, project_id = excluded.project_id,
              linear_url = COALESCE(excluded.linear_url, tickets.linear_url),
              linear_issue_id = COALESCE(excluded.linear_issue_id, tickets.linear_issue_id),
              linear_state = COALESCE(excluded.linear_state, tickets.linear_state),
+             linear_state_type = COALESCE(excluded.linear_state_type, tickets.linear_state_type),
              lead_thread_id = excluded.lead_thread_id, environment_id = excluded.environment_id,
              branch = excluded.branch, base = excluded.base,
              updated_at = CASE WHEN tickets.title IS excluded.title AND tickets.branch IS excluded.branch
                AND tickets.base IS excluded.base AND tickets.linear_state IS excluded.linear_state
+               AND tickets.linear_state_type IS excluded.linear_state_type
                THEN tickets.updated_at ELSE excluded.updated_at END`,
         )
         .run({ ...found, implementerThreadIds: undefined, boardId: this.boardId, at });
@@ -525,6 +531,7 @@ export class BoardStore {
     linearUrl: string | null;
     linearIssueId: string | null;
     linearState: string | null;
+    linearStateType: string | null;
   }): void {
     const [link] = this.threadTickets(input.threadId);
     if (!link) throw new Error(`Thread ${input.threadId} is not on the board.`);
@@ -533,13 +540,14 @@ export class BoardStore {
       this.db
         .prepare(
           `INSERT INTO tickets (board_id, key, title, repo, project_id, linear_url, linear_issue_id, linear_state,
-             lead_thread_id, environment_id, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             linear_state_type, lead_thread_id, environment_id, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(board_id, key) DO UPDATE SET
              title = COALESCE(excluded.title, tickets.title),
              linear_url = COALESCE(excluded.linear_url, tickets.linear_url),
              linear_issue_id = COALESCE(excluded.linear_issue_id, tickets.linear_issue_id),
-             linear_state = COALESCE(excluded.linear_state, tickets.linear_state)`,
+             linear_state = COALESCE(excluded.linear_state, tickets.linear_state),
+             linear_state_type = COALESCE(excluded.linear_state_type, tickets.linear_state_type)`,
         )
         .run(
           this.boardId,
@@ -550,6 +558,7 @@ export class BoardStore {
           input.linearUrl,
           input.linearIssueId,
           input.linearState,
+          input.linearStateType,
           home.lead_thread_id,
           home.environment_id,
           this.now(),
@@ -571,6 +580,12 @@ export class BoardStore {
   getTicket(key: string): Ticket | null {
     const row = this.row(key);
     return row ? this.toTicket(row) : null;
+  }
+
+  setLinearState(key: string, stateName: string | null, stateType: string | null): void {
+    this.db
+      .prepare(`UPDATE tickets SET linear_state = ?, linear_state_type = ? WHERE board_id = ? AND key = ?`)
+      .run(stateName, stateType, this.boardId, key);
   }
 
   linearIssueId(key: string): string | null {
@@ -725,6 +740,7 @@ export class BoardStore {
       projectId: row.project_id,
       linearUrl: row.linear_url,
       linearState: row.linear_state,
+      linearStateType: row.linear_state_type,
       leadThreadId: row.lead_thread_id,
       implementerThreadIds: implementers,
       environmentId: row.environment_id,

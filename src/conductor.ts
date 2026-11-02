@@ -14,6 +14,7 @@ import {
   type Ticket,
 } from "./contract";
 import { deliver } from "./decisions";
+import { Landings, runGh, type Gh } from "./github";
 import { applyOptionsPatch, boardOptionsSchema, DEFAULT_TICKET_PATTERN, type BoardOptionsPatch } from "./options";
 import { planDiff, planFeedbackMessage } from "./plans";
 import type { NewDecision, Store, TableName } from "./store";
@@ -53,10 +54,15 @@ export class Conductor {
   private readonly engines = new Map<number, BoardEngine>();
   private integrations: Integrations = { linear: false, codeReview: false };
 
+  private readonly landings: Landings;
+
   constructor(
     private readonly bb: BbPluginApi,
     private readonly store: Store,
-  ) {}
+    gh: Gh = runGh,
+  ) {
+    this.landings = new Landings(gh, (message) => bb.log.warn(message));
+  }
 
   integrationsNow(): Integrations {
     return this.integrations;
@@ -78,7 +84,13 @@ export class Conductor {
     let engine = this.engines.get(boardId);
     if (!engine) {
       if (!this.store.getBoard(boardId)) throw new Error(`No board ${boardId}.`);
-      engine = new BoardEngine(this.bb, this.store.board(boardId), () => this.integrations, () => this.changed());
+      engine = new BoardEngine(
+        this.bb,
+        this.store.board(boardId),
+        () => this.integrations,
+        () => this.changed(),
+        this.landings,
+      );
       this.engines.set(boardId, engine);
     }
     return engine;

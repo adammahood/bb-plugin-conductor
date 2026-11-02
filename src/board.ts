@@ -18,6 +18,7 @@ import {
   type TicketDetail,
 } from "./contract";
 import { discoverTickets } from "./discovery";
+import type { Landings } from "./github";
 import { compileRegex, DEFAULT_TICKET_PATTERN, milestoneFor, type BoardOptions } from "./options";
 import { linearIssue, linearResolve, reviewsForThreads } from "./peers";
 import { checkPlanPath, PLAN_MAX_BYTES } from "./plans";
@@ -65,6 +66,7 @@ export class BoardEngine {
     readonly store: BoardStore,
     private readonly integrations: () => Integrations,
     private readonly onChange: () => void,
+    private readonly landings: Landings,
   ) {}
 
   get boardId(): number {
@@ -96,6 +98,7 @@ export class BoardEngine {
       const result = await discoverTickets(this.bb, this.store, orchestratorThreadId, ticketPattern, {
         linear: this.integrations().linear,
       });
+      if (this.integrations().linear) await this.refreshLinearStates(result.bound);
       await this.refreshFacts();
       root.setSweep(this.boardId, result.warning);
     } catch (error) {
@@ -126,6 +129,30 @@ export class BoardEngine {
     this.facts.statuses = statuses;
     await this.refreshReviews(ids);
     await this.inferPlanRounds(this.store.listTickets());
+    await this.refreshLandings(this.store.listTickets());
+  }
+
+  /** Tickets without a thread binding of their own, looked up by key in their lead's Linear scope. */
+  private async refreshLinearStates(bound: Set<string>): Promise<void> {
+    const byLead = new Map<string, string[]>();
+    for (const t of this.store.listTickets()) {
+      if (!bound.has(t.key)) byLead.set(t.leadThreadId, [...(byLead.get(t.leadThreadId) ?? []), t.key]);
+    }
+    for (const [lead, keys] of byLead) {
+      for (let i = 0; i < keys.length; i += 24) {
+        for (const issue of (await linearResolve(this.bb, keys.slice(i, i + 24), lead)).values()) {
+          this.store.setLinearState(issue.identifier, issue.stateName, issue.stateType);
+        }
+      }
+    }
+  }
+
+  /** Asks GitHub about tickets that are In milestone by their PRs. */
+  private async refreshLandings(tickets: Ticket[]): Promise<void> {
+    for (const ticket of tickets) {
+      const stage = this.withStage(ticket).stage;
+      if (stage === "in-milestone") await this.landings.refresh(ticket.prs);
+    }
   }
 
   /**
@@ -318,6 +345,8 @@ export class BoardEngine {
       reportedAfterReview: (ticket.reportedAt ?? 0) > (review?.sentAt ?? Infinity),
       planRound: planRound as "open" | "approved" | "changes_requested" | null,
       agentRunning: running,
+      trackerDone: ticket.linearStateType === "completed",
+      landed: this.landings.landed(ticket.prs),
     });
     return {
       ...ticket,
@@ -414,6 +443,7 @@ export class BoardEngine {
       linearUrl: linear?.url ?? null,
       linearIssueId: linear?.issueId || null,
       linearState: linear?.stateName ?? null,
+      linearStateType: linear?.stateType ?? null,
     });
     return wanted;
   }
@@ -453,6 +483,9 @@ export class BoardEngine {
     await this.refreshReviews();
     const ticket = this.store.getTicket(ticketKey)!;
     this.changed();
+    if (input.prs?.some((pr) => pr.state === "merged")) {
+      void this.refreshLandings([ticket]).then(() => this.changed());
+    }
     return this.withStage(ticket);
   }
 

@@ -17,6 +17,7 @@ import {
 import { askedNotice } from "./src/decisions";
 import { planPrefix } from "./src/plans";
 import { agentInstructions, RULE_IDS, type BoardOptionsPatch } from "./src/options";
+import type { Gh } from "./src/github";
 import { MIGRATIONS, Store } from "./src/store";
 
 export { rpcContract };
@@ -144,11 +145,11 @@ function formatDecision(d: Decision): string {
   return [head, ...options, ...answer].join("\n");
 }
 
-export default async function plugin(bb: BbPluginApi) {
+export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
   const db = bb.storage.database();
   bb.storage.migrate(db, MIGRATIONS);
   const store = new Store(db);
-  const conductor = new Conductor(bb, store);
+  const conductor = new Conductor(bb, store, deps.gh);
 
   /** The board a CLI call means: the one given, or the only one there is. */
   const boardOf = (boardId: number | undefined) => {

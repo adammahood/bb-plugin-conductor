@@ -41,6 +41,7 @@ const ticket: Ticket = {
   projectId: "proj_api",
   linearUrl: "https://linear.app/acme/issue/ABC-101",
   linearState: "In Progress",
+  linearStateType: "started",
   leadThreadId: "thr_lead1",
   implementerThreadIds: ["thr_impl1"],
   environmentId: "env_1",

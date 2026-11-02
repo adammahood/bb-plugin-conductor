@@ -5,6 +5,8 @@ import type { BoardStore, DiscoveredTicket } from "./store";
 
 export interface DiscoveryResult {
   tickets: number;
+  /** Tickets whose Linear state came from a thread binding this sweep. */
+  bound: Set<string>;
   /** Set when Linear could not be read; tickets then come from titles. */
   warning: string | null;
 }
@@ -24,7 +26,7 @@ export async function discoverTickets(
   const leads = (
     await bb.sdk.threads.list({ parentThreadId: orchestratorThreadId, limit: 200 })
   ).sort((a, b) => a.createdAt - b.createdAt);
-  if (leads.length === 0) return { tickets: 0, warning: null };
+  if (leads.length === 0) return { tickets: 0, bound: new Set(), warning: null };
 
   let bindings = new Map<string, LinearBinding>();
   let warning: string | null = null;
@@ -65,6 +67,7 @@ export async function discoverTickets(
       linearUrl: binding?.url ?? null,
       linearIssueId: binding?.issueId ?? null,
       linearState: binding?.stateName ?? null,
+      linearStateType: binding?.stateType ?? null,
       leadThreadId: lead.id,
       environmentId: lead.environmentId,
       branch: environment?.branchName ?? null,
@@ -80,7 +83,7 @@ export async function discoverTickets(
   }
 
   await writeThreadMetadata(bb, roles);
-  return { tickets: count, warning };
+  return { tickets: count, bound: new Set([...bindings.values()].map((b) => b.identifier)), warning };
 }
 
 /** Writes `{boardId, ticketKey, role}` only where it changed, so a sweep is cheap. */

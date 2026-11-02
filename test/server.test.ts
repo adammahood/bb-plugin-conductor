@@ -21,6 +21,8 @@ interface World {
   round: Record<string, unknown>;
   /** Files on the agents' machine, by absolute path. */
   files: Record<string, string>;
+  /** Linear states for keys looked up by identifier. */
+  issueStates: Record<string, { stateName: string; tone: string }>;
 }
 
 function thread(id: string, parentThreadId: string, title: string, extra = {}) {
@@ -36,7 +38,14 @@ function thread(id: string, parentThreadId: string, title: string, extra = {}) {
 }
 
 async function setup(
-  options: { world?: Partial<World>; board?: Record<string, unknown>; peers?: string[]; noBoard?: boolean } = {},
+  options: {
+    world?: Partial<World>;
+    board?: Record<string, unknown>;
+    peers?: string[];
+    noBoard?: boolean;
+    /** Answers for `gh api <path>`, by path; anything else fails like a 404. */
+    github?: Record<string, string>;
+  } = {},
 ) {
   const world: World = {
     children: {
@@ -64,6 +73,7 @@ async function setup(
     replies: {},
     round: {},
     files: {},
+    issueStates: {},
     ...options.world,
   };
   const metadata = new Map<string, Record<string, unknown>>();
@@ -146,8 +156,8 @@ async function setup(
                   id: `issue-${identifier}`,
                   identifier,
                   title: `Accounts API - Title of ${identifier}`,
-                  stateName: "In Progress",
                   url: `https://linear.app/acme/issue/${identifier}`,
+                  ...(world.issueStates[identifier] ?? { stateName: "In Progress" }),
                 })),
               };
             }
@@ -183,13 +193,20 @@ async function setup(
       },
     } as never,
   });
-  await plugin(bb);
+  const ghCalls: string[] = [];
+  const gh = async (args: string[]) => {
+    ghCalls.push(args[1]!);
+    const answer = options.github?.[args[1]!];
+    if (answer === undefined) throw new Error("gh: Not Found (HTTP 404)");
+    return `${answer}\n`;
+  };
+  await plugin(bb, { gh });
   if (!options.noBoard) {
     await harness.behavior.callRpc("boards.create", { threadId: ORCH });
     await harness.behavior.callRpc("boards.update", { boardId: 1, options: { githubOwner: "acme", ...options.board } });
     await harness.behavior.callRpc("board.refresh", { boardId: 1 });
   }
-  return { harness, metadata, sent, world };
+  return { harness, metadata, sent, world, ghCalls };
 }
 
 type Harness = Awaited<ReturnType<typeof setup>>["harness"];
@@ -461,6 +478,74 @@ describe("stage reports", () => {
     await expect(
       harness.behavior.callAgentTool(REPORT_TOOL, { stage: "shipping" }, { threadId: "thr_lead1" }),
     ).rejects.toThrow();
+  });
+});
+
+describe("done after release", () => {
+  const noReview = { round: { userArchivedAt: 1 } };
+  const merged = (number: number, state = "merged") => ({ repo: "web", number, base: "m1-avatars", state });
+  const releasePrs = "pulls?state=closed&base=main&head=acme%3Am1-avatars&per_page=100";
+  const github = { "repos/acme/web/pulls/40": "m1-avatars\t2026-03-02T10:00:00Z", "repos/acme/web": "main" };
+  const stageOf = async (harness: Harness, key: string) =>
+    ((await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board).tickets.find((t) => t.key === key)!.stage;
+
+  it("moves merged work to Done once the milestone's release PR into the default branch merged", async () => {
+    const { harness, ghCalls } = await setup({ world: noReview, github: { ...github, [`repos/acme/web/${releasePrs}`]: "" } });
+    await harness.behavior.callAgentTool(REPORT_TOOL, { stage: "in-milestone", prs: [merged(40), merged(41, "held")] }, { threadId: "thr_lead2" });
+    await harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    expect(await stageOf(harness, "ABC-102")).toBe("in-milestone");
+    // Without a release PR the branch is compared; a deleted branch is a 404.
+    expect(ghCalls).toContain("repos/acme/web/compare/m1-avatars...main");
+    expect(ghCalls).not.toContain("repos/acme/web/pulls/41");
+
+    const released = await setup({ world: noReview, github: { ...github, [`repos/acme/web/${releasePrs}`]: "2026-03-09T16:00:00Z" } });
+    await released.harness.behavior.callAgentTool(REPORT_TOOL, { stage: "in-milestone", prs: [merged(40)] }, { threadId: "thr_lead2" });
+    await released.harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    expect(await stageOf(released.harness, "ABC-102")).toBe("done");
+  });
+
+  it("does not count a release that merged before the ticket's PR", async () => {
+    const { harness } = await setup({ world: noReview, github: { ...github, [`repos/acme/web/${releasePrs}`]: "2026-02-20T16:00:00Z" } });
+    await harness.behavior.callAgentTool(REPORT_TOOL, { prs: [merged(40)] }, { threadId: "thr_lead2" });
+    await harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    expect(await stageOf(harness, "ABC-102")).toBe("in-milestone");
+  });
+
+  it("counts a milestone branch that is an ancestor of the default branch, and a PR merged straight into it", async () => {
+    const ancestor = await setup({ world: noReview, github: { ...github, [`repos/acme/web/${releasePrs}`]: "", "repos/acme/web/compare/m1-avatars...main": "ahead" } });
+    await ancestor.harness.behavior.callAgentTool(REPORT_TOOL, { prs: [merged(40)] }, { threadId: "thr_lead2" });
+    await ancestor.harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    expect(await stageOf(ancestor.harness, "ABC-102")).toBe("done");
+
+    const direct = await setup({ world: noReview, github: { "repos/acme/web/pulls/40": "main\t2026-03-02T10:00:00Z", "repos/acme/web": "main" } });
+    await direct.harness.behavior.callAgentTool(REPORT_TOOL, { prs: [merged(40)] }, { threadId: "thr_lead2" });
+    await direct.harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    expect(await stageOf(direct.harness, "ABC-102")).toBe("done");
+  });
+
+  it("is Done when Linear has the issue in a completed state, even with a PR held open", async () => {
+    const { harness } = await setup({
+      world: {
+        ...noReview,
+        bindings: {
+          thr_lead1: {
+            binding: { issueId: "issue-1126", identifier: "ABC-101", title: "Accept avatar uploads", stateName: "Done", url: null, tone: "completed" },
+            suggestion: null,
+          },
+        },
+      },
+    });
+    await harness.behavior.callAgentTool(REPORT_TOOL, { stage: "in-review", prs: [merged(40), { ...merged(41), state: "draft" }] }, { threadId: "thr_lead1" });
+    expect(await stageOf(harness, "ABC-101")).toBe("done");
+  });
+
+  it("reads Linear state on each sweep for tickets without a thread binding", async () => {
+    const { harness, world } = await setup({ world: noReview });
+    await harness.behavior.callAgentTool(REPORT_TOOL, { prs: [merged(40)] }, { threadId: "thr_lead2" });
+    expect(await stageOf(harness, "ABC-102")).toBe("in-milestone");
+    world.issueStates["ABC-102"] = { stateName: "Done", tone: "completed" };
+    await harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    expect(await stageOf(harness, "ABC-102")).toBe("done");
   });
 });
 
