@@ -543,12 +543,20 @@ export class BoardEngine {
         this.bb.log.warn(`unarchive ${threadId}: ${String(error).slice(0, 300)}`);
       });
     }
+    // One at a time: threads that shared a worktree come back on the same branch, and bb fails overlapping restores.
     for (const threadId of ids) {
       if (!(await this.restorable(threadId))) continue;
-      await this.bb.sdk.threads.restoreEnvironment({ threadId }).then(
-        () => (restored += 1),
-        (error: unknown) => this.bb.log.warn(`restore ${threadId}: ${String(error).slice(0, 300)}`),
-      );
+      try {
+        await this.bb.sdk.threads.restoreEnvironment({ threadId });
+        restored += 1;
+        for (let i = 0; i < 120; i += 1) {
+          const thread = (await this.bb.sdk.threads.get({ threadId }).catch(() => null)) as { status?: string } | null;
+          if (thread?.status !== "starting") break;
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      } catch (error) {
+        this.bb.log.warn(`restore ${threadId}: ${String(error).slice(0, 300)}`);
+      }
     }
     const note = `Unarchived ${ids.length === 1 ? "1 thread" : `${ids.length} threads`}${restored ? `, restored ${restored === 1 ? "1 worktree" : `${restored} worktrees`}` : ""}`;
     this.store.setArchiveState(key, "unarchived", null, ids, note);

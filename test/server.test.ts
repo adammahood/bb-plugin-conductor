@@ -86,6 +86,7 @@ async function setup(
   const sent: { threadId: string; text: string; originPluginId?: string; mode: string }[] = [];
   const calls: { archive: string[]; unarchive: string[]; restore: string[] } = { archive: [], unarchive: [], restore: [] };
   const gets: Record<string, number> = {};
+  let restoring: string | null = null;
   const allThreads = () => Object.values(world.children).flat();
   const setArchived = (threadId: string, at: number | null): string[] => {
     const thread = allThreads().find((t) => t.id === threadId);
@@ -106,6 +107,7 @@ async function setup(
           environmentId: `env_${threadId}`,
           // bb sets the flag a moment after unarchiving.
           canRestoreEnvironment: world.removed.includes(threadId) && (gets[threadId] = (gets[threadId] ?? 0) + 1) > 1,
+          status: restoring === threadId ? ((restoring = null), "starting") : "idle",
         }),
         archive: async ({ threadId }: { threadId: string }) => {
           calls.archive.push(threadId);
@@ -117,6 +119,8 @@ async function setup(
           return { ok: true };
         },
         restoreEnvironment: async ({ threadId }: { threadId: string }) => {
+          if (restoring) throw new Error("another restore is still starting");
+          restoring = threadId;
           calls.restore.push(threadId);
           return {};
         },
@@ -727,15 +731,15 @@ describe("done tickets", () => {
     const { harness, calls, world } = await setup({ world: noReview, board: archiving });
     await done(harness, "thr_lead1");
     await refresh(harness);
-    world.removed = ["thr_lead1"];
+    world.removed = ["thr_lead1", "thr_impl1"];
     const { ticket } = (await harness.behavior.callRpc("ticket.unarchive", { boardId: 1, key: "ABC-101" })) as { ticket: Ticket };
     expect(calls.unarchive).toEqual(["thr_lead1", "thr_impl1"]);
-    expect(calls.restore).toEqual(["thr_lead1"]);
+    expect(calls.restore).toEqual(["thr_lead1", "thr_impl1"]);
     expect(ticket.archive).toMatchObject({ state: "unarchived" });
     await refresh(harness);
     expect(calls.archive).toEqual(["thr_lead1"]);
     const { detail } = (await harness.behavior.callRpc("board.ticket", { boardId: 1, key: "ABC-101" })) as { detail: TicketDetail };
-    expect(detail.stageEvents[0]).toMatchObject({ kind: "unarchived", note: "Unarchived 2 threads, restored 1 worktree" });
+    expect(detail.stageEvents[0]).toMatchObject({ kind: "unarchived", note: "Unarchived 2 threads, restored 2 worktrees" });
   });
 
   it("archives nothing with the setting off, but records threads archived by hand and when a ticket was Done", async () => {
