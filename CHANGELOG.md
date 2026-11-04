@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0
+
+- New Blocked stage. Agents report `blocked` with `blockedBy` (up to 5 ticket keys) and the reason as the note, or just a note for outside work; `bb conductor report <key> --stage blocked --blocked-by <key> --note ...` does the same. Any other stage clears it.
+- Blocked tickets get their own section on the board, apart from Building. The card names what the ticket waits on, links to those tickets and shows how each moved since.
+- When a blocking ticket is Done, the card says so with a **Tell the agent** button. New board setting "Tell blocked agents automatically when their blocker is Done" (off by default) sends that message once every blocking ticket is Done.
+- A code review or plan round waiting on you, and Done in Linear, still show ahead of Blocked. Next PR to open skips Blocked tickets.
+- The "Report stages" agent rule tells agents to report blocked with the blocking key and end their turn.
+
 ## 0.4.2
 
 - A submitted plan round is never superseded by the plans folder. When the agent edits the file after submitting, the round keeps the copy you review and says the file changed; the agent's next submission opens the next round.
