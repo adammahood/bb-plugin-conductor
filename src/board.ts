@@ -15,6 +15,7 @@ import {
   type Role,
   type Stage,
   type Ticket,
+  type Blocker,
   type TicketArchive,
   type TicketDetail,
 } from "./contract";
@@ -106,6 +107,7 @@ export class BoardEngine {
       if (this.integrations().linear) await this.refreshLinearStates(result.bound);
       await this.refreshFacts();
       this.trackDone();
+      await this.tellUnblockedAgents();
       this.syncArchives();
       await this.archiveDone();
       root.setSweep(this.boardId, result.warning);
@@ -374,7 +376,8 @@ export class BoardEngine {
     this.changed();
   }
 
-  private withStage(ticket: Ticket): Ticket {
+  /** `blockers` is filled in only at the top level, so tickets blocking each other cannot recurse. */
+  private withStage(ticket: Ticket, blockers = true): Ticket {
     const plan = ticket.planRound;
     const planRound = plan && ["open", "approved", "changes_requested"].includes(plan.status) ? plan.status : null;
     // A round waiting on the user outranks one already with the agent.
@@ -399,6 +402,7 @@ export class BoardEngine {
       stage: decision.stage,
       stageSource: decision.source,
       archive: this.archiveView(ticket),
+      blockers: blockers ? this.blockersOf(ticket) : [],
       openReview: review
         ? { targetKey: review.targetKey, gitRef: review.gitRef, state: review.state as "needs-review" | "with-agent" }
         : null,
@@ -422,6 +426,61 @@ export class BoardEngine {
       return { state: "archived", reason: null, threadIds: ids, at: Math.max(...(archivedAt as number[])) };
     }
     return stored;
+  }
+
+  private blockersOf(ticket: Ticket): Blocker[] {
+    if (ticket.reportedStage !== "blocked" || ticket.blockedAt === null) return [];
+    const told = new Set(this.store.blockedTold(ticket.key));
+    return ticket.blockedBy.map((key) => {
+      const other = this.store.getTicket(key);
+      if (!other) return { key, onBoard: false, stage: null, moved: null, told: told.has(key) };
+      const event = this.store.latestEvent(key, ticket.blockedAt!);
+      return {
+        key,
+        onBoard: true,
+        stage: this.withStage(other, false).stage,
+        moved: event ? { stage: event.stage, note: event.note, at: event.at } : null,
+        told: told.has(key),
+      };
+    });
+  }
+
+  /** Tells a Blocked ticket's lead which tickets it waits on are Done now. */
+  async tellUnblocked(key: string): Promise<Ticket> {
+    const stored = this.store.getTicket(key);
+    if (!stored) throw new Error(`No ticket ${key} on the board.`);
+    const ticket = this.withStage(stored);
+    if (ticket.stage !== "blocked") throw new Error(`${key} is not Blocked.`);
+    const done = ticket.blockers.filter((b) => b.stage === "done").map((b) => b.key);
+    if (done.length === 0) throw new Error(`Nothing ${key} waits on is Done yet.`);
+    const waiting = ticket.blockers.filter((b) => b.stage !== "done").map((b) => b.key);
+    const text =
+      `[conductor] ${done.join(", ")} ${done.length === 1 ? "is" : "are"} Done.` +
+      (waiting.length > 0
+        ? ` ${key} still waits on ${waiting.join(", ")}.`
+        : ` You can continue ${key}; report your next stage when you resume.`);
+    await this.bb.sdk.threads.send({
+      threadId: ticket.leadThreadId,
+      mode: "auto",
+      originPluginId: this.bb.pluginId,
+      input: [{ type: "text", text, mentions: [] }],
+    });
+    this.store.setBlockedTold(key, [...new Set([...this.store.blockedTold(key), ...done])]);
+    this.changed();
+    return this.withStage(this.store.getTicket(key)!);
+  }
+
+  /** With the board's setting on, tells each Blocked agent once every ticket it waits on is Done. */
+  private async tellUnblockedAgents(): Promise<void> {
+    if (!this.store.record().options.tellBlockedAgents) return;
+    for (const ticket of this.store.listTickets().map((t) => this.withStage(t))) {
+      const { blockers } = ticket;
+      if (ticket.stage !== "blocked" || blockers.length === 0) continue;
+      if (!blockers.every((b) => b.stage === "done") || blockers.every((b) => b.told)) continue;
+      await this.tellUnblocked(ticket.key).catch((error: unknown) =>
+        this.bb.log.warn(`tell ${ticket.key} unblocked: ${String(error).slice(0, 300)}`),
+      );
+    }
   }
 
   /** Records when tickets become Done, with a history entry for an inferred Done. */
@@ -745,6 +804,7 @@ export class BoardEngine {
       note: string | null;
       prs: PullRequest[] | null;
       milestone: string | null;
+      blockedBy?: string[] | null;
     },
   ): Promise<Ticket> {
     let ticketKey: string;
@@ -756,7 +816,11 @@ export class BoardEngine {
         throw new Error(`No ticket ${ticketKey} on the board; pass the thread it is worked in.`);
       }
     }
-    this.store.reportStage({ ...input, ticketKey, threadId });
+    if (input.stage === "blocked" && !input.blockedBy?.length && !input.note) {
+      throw new Error("Report blocked with blockedBy (the ticket keys you wait on) or a note saying what you wait on.");
+    }
+    const blockedBy = [...new Set((input.blockedBy ?? []).map((k) => k.trim().toUpperCase()).filter(Boolean))].slice(0, 5);
+    this.store.reportStage({ ...input, blockedBy, ticketKey, threadId });
     await this.refreshReviews();
     this.trackDone([this.store.getTicket(ticketKey)!]);
     const ticket = this.store.getTicket(ticketKey)!;
@@ -796,7 +860,7 @@ export function nextPrToOpen(tickets: Ticket[]): NextPr | null {
   }
   if (tickets.some((t) => t.prs.some((pr) => pr.state === "open"))) return null;
   for (const ticket of ordered) {
-    if (ticket.stage === "paused") continue;
+    if (ticket.stage === "paused" || ticket.stage === "blocked") continue;
     const draft = ticket.prs.find((pr) => pr.state === "draft" && pr.number !== null);
     if (draft) return pick(ticket, draft, null);
   }

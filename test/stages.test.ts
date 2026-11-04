@@ -102,6 +102,15 @@ describe("decideStage", () => {
     expect(decideStage(facts({ reported: "plan-review", planRound: "approved" })).stage).toBe("building");
   });
 
+  it("shows Blocked as reported, behind paused, things waiting on the user and Linear Done", () => {
+    const blocked = facts({ reported: "blocked", prs: [pr(56, "draft")], planRound: "approved" });
+    expect(decideStage(blocked)).toMatchObject({ stage: "blocked", source: "reported" });
+    expect(decideStage({ ...blocked, reviewRound: "needs-review" }).stage).toBe("code-review");
+    expect(decideStage({ ...blocked, planRound: "open" }).stage).toBe("plan-review");
+    expect(decideStage({ ...blocked, trackerDone: true }).stage).toBe("done");
+    expect(decideStage({ ...blocked, prs: [pr(56, "open")] }).stage).toBe("blocked");
+  });
+
   it("moves merged work to Done once its milestone has reached the default branch", () => {
     expect(decideStage(facts({ prs: [pr(55, "merged")], landed: true }))).toMatchObject({ stage: "done", source: "inferred" });
     expect(decideStage(facts({ reported: "in-milestone", prs: [pr(55, "merged")], landed: true })).stage).toBe("done");

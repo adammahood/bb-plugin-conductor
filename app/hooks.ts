@@ -140,6 +140,7 @@ export const STAGE_LABELS: Record<Stage, string> = {
   "in-milestone": "In milestone",
   done: "Done",
   paused: "Paused",
+  blocked: "Blocked",
 };
 
 export const STAGE_HINTS: Record<Stage, string> = {
@@ -152,6 +153,7 @@ export const STAGE_HINTS: Record<Stage, string> = {
   "in-milestone": "merged into the milestone branch",
   done: "milestone in main, or work with no PR finished",
   paused: "stopped on purpose; resume from here",
+  blocked: "waiting on another ticket or outside work",
 };
 
 /** "In milestone" reads "Merged" on boards without milestones. */

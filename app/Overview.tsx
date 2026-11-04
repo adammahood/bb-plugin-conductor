@@ -1,8 +1,8 @@
 import { useState, type ReactNode } from "react";
-import { UrlLink, useBbNavigate } from "@get-bb/plugin-sdk/app";
+import { UrlLink, experimental_useRpcMutation as useRpcMutation, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { STAGES, type Board, type Decision, type PlanRound, type PullRequest, type Stage, type Ticket } from "../src/contract";
+import { STAGES, rpcContract, type Board, type Decision, type PlanRound, type PullRequest, type Stage, type Ticket } from "../src/contract";
 import { useOpenAgentThread, useOpenOrchestratorTab } from "./AgentTabs";
 import { DecisionCard } from "./DecisionCard";
 import {
@@ -11,6 +11,7 @@ import {
   onBoard,
   stageLabel,
   WAITS_ON_YOU,
+  STAGE_LABELS,
   ago,
   errorText,
   shortTitle,
@@ -21,7 +22,7 @@ import {
   type Presence,
 } from "./hooks";
 
-const PIPELINE = STAGES.filter((stage) => stage !== "paused");
+const PIPELINE = STAGES.filter((stage) => stage !== "paused" && stage !== "blocked");
 
 export function Overview({ board, decisions }: { board: Board; decisions: Decision[] }) {
   const go = useGo();
@@ -81,6 +82,7 @@ export function Overview({ board, decisions }: { board: Board; decisions: Decisi
           />
         ))}
         <div className="mt-4 border-t border-dashed border-border pt-3">
+          <StageSection stage="blocked" marker="⧗" tickets={byStage("blocked")} milestones={milestonesOn} aside />
           <StageSection stage="paused" marker="‖" tickets={byStage("paused")} milestones={milestonesOn} aside />
         </div>
       </div>
@@ -444,6 +446,59 @@ function TicketCard({ ticket }: { ticket: Ticket }) {
   );
 }
 
+/** What a Blocked ticket waits on, how each blocking ticket moved since, and the Tell the agent button. */
+export function BlockedNote({ ticket }: { ticket: Ticket }) {
+  const openTicket = useOpenTicket();
+  const tell = useRpcMutation({ contract: rpcContract, method: "ticket.tellUnblocked" });
+  const done = ticket.blockers.filter((b) => b.stage === "done");
+  const untold = done.filter((b) => !b.told);
+  return (
+    <div className="grid gap-1 text-[12.5px]">
+      <p className="text-[var(--warning-text)]">
+        Blocked
+        {ticket.blockedBy.length > 0 && " on "}
+        {ticket.blockedBy.map((key, i) => (
+          <span key={key}>
+            {i > 0 && ", "}
+            {ticket.blockers.find((b) => b.key === key)?.onBoard ? (
+              <button type="button" className="font-semibold hover:underline" onClick={() => openTicket(ticket.boardId, key)}>
+                {key}
+              </button>
+            ) : (
+              <span className="font-semibold">{key}</span>
+            )}
+          </span>
+        ))}
+        {ticket.stageNote && `: ${ticket.stageNote}`}
+      </p>
+      {ticket.blockers
+        .filter((b) => b.onBoard)
+        .map((b) => (
+          <p key={b.key} className={cn("text-muted-foreground", b.stage === "done" && "font-medium text-[var(--success)]")}>
+            {b.stage === "done"
+              ? `${b.key} is Done${b.told ? "; the agent was told." : "."}`
+              : `${b.key} is ${b.stage ? STAGE_LABELS[b.stage] : "on the board"} now${
+                  b.moved ? ` (${b.moved.note ? `${b.moved.note}, ` : ""}${ago(b.moved.at)})` : ", no change since"
+                }.`}
+          </p>
+        ))}
+      {untold.length > 0 && (
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={tell.isPending}
+            onClick={() => void tell.mutate({ boardId: ticket.boardId, key: ticket.key }).catch(() => {})}
+          >
+            Tell the agent
+          </Button>
+          {tell.error && <span className="text-destructive">{errorText(tell.error)}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PlanNote({ boardId, ticketKey, round }: { boardId: number; ticketKey: string; round: PlanRound }) {
   const go = useGo();
   const open = round.status === "open";
@@ -478,6 +533,7 @@ function PlanWaitingCard({ round }: { round: PlanRound }) {
 }
 
 function CardNote({ ticket }: { ticket: Ticket }) {
+  if (ticket.stage === "blocked") return <BlockedNote ticket={ticket} />;
   if (ticket.openReview?.state === "with-agent") {
     return <p className="text-[12.5px] text-muted-foreground">Your review comments are with the agent.</p>;
   }

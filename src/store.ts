@@ -126,6 +126,10 @@ export const MIGRATIONS = [
   )`,
   // The plan file's hash when it last differed from an open round's copy.
   `ALTER TABLE plan_rounds ADD COLUMN file_sha256 TEXT`,
+  `ALTER TABLE tickets ADD COLUMN blocked_by_json TEXT NOT NULL DEFAULT '[]'`,
+  `ALTER TABLE tickets ADD COLUMN blocked_at INTEGER`,
+  // Blocking tickets whose Done the blocked agent was already told about.
+  `ALTER TABLE tickets ADD COLUMN blocked_told_json TEXT NOT NULL DEFAULT '[]'`,
 ];
 
 export interface BoardRecord {
@@ -196,6 +200,9 @@ interface TicketRow {
   linear_state: string | null;
   linear_state_type: string | null;
   done_at: number | null;
+  blocked_by_json: string;
+  blocked_at: number | null;
+  blocked_told_json: string;
   lead_thread_id: string;
   environment_id: string | null;
   branch: string | null;
@@ -633,9 +640,19 @@ export class BoardStore {
     note: string | null;
     prs: PullRequest[] | null;
     milestone: string | null;
+    blockedBy?: string[] | null;
   }): void {
     const at = this.now();
     this.db.transaction(() => {
+      // A Blocked report sets what the ticket waits on; any other stage clears it.
+      if (input.stage !== null) {
+        const blocked = input.stage === "blocked";
+        this.db
+          .prepare(
+            `UPDATE tickets SET blocked_by_json = ?, blocked_at = ?, blocked_told_json = '[]' WHERE board_id = ? AND key = ?`,
+          )
+          .run(JSON.stringify(blocked ? (input.blockedBy ?? []) : []), blocked ? at : null, this.boardId, input.ticketKey);
+      }
       this.db
         .prepare(
           `UPDATE tickets SET reported_stage = COALESCE(?, reported_stage),
@@ -663,6 +680,19 @@ export class BoardStore {
   }
 
   /** Records the first time the board sees the ticket Done, or clears it when the ticket leaves Done. */
+  blockedTold(ticketKey: string): string[] {
+    return JSON.parse(this.row(ticketKey)?.blocked_told_json ?? "[]") as string[];
+  }
+
+  setBlockedTold(ticketKey: string, keys: string[]): void {
+    this.db.prepare(`UPDATE tickets SET blocked_told_json = ? WHERE board_id = ? AND key = ?`).run(JSON.stringify(keys), this.boardId, ticketKey);
+  }
+
+  /** The ticket's latest history entry after a time, for showing how a blocking ticket moved. */
+  latestEvent(ticketKey: string, after: number): StageEvent | null {
+    return this.stageEvents(ticketKey).find((e) => e.at >= after && e.kind === "stage") ?? null;
+  }
+
   setDone(ticketKey: string, done: boolean, note: string | null): void {
     const row = this.row(ticketKey);
     if (!row || (row.done_at !== null) === done) return;
@@ -840,6 +870,9 @@ export class BoardStore {
       openReview: null,
       openDecisions: counts.open,
       blockingDecisions: counts.blocking,
+      blockedBy: JSON.parse(row.blocked_by_json) as string[],
+      blockedAt: row.blocked_at,
+      blockers: [],
       doneAt: row.done_at,
       archive: this.archiveState(row.key),
       updatedAt: row.updated_at,

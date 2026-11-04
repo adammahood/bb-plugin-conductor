@@ -776,6 +776,78 @@ describe("done tickets", () => {
   });
 });
 
+describe("blocked tickets", () => {
+  const noReview = { round: { userArchivedAt: 1 } };
+  const ticketOf = async (harness: Harness, key: string) =>
+    ((await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board).tickets.find((t) => t.key === key)!;
+  const block = (harness: Harness, args: Record<string, unknown> = { stage: "blocked", blockedBy: ["abc-101"], note: "route PR" }) =>
+    harness.behavior.callAgentTool(REPORT_TOOL, args, { threadId: "thr_lead2" });
+
+  it("shows what a Blocked ticket waits on and how that ticket moved since, and clears on the next stage", async () => {
+    const { harness } = await setup({ world: noReview });
+    expect(await block(harness)).toBe('ABC-102 is now "blocked" on the board.');
+    expect(await ticketOf(harness, "ABC-102")).toMatchObject({
+      stage: "blocked",
+      stageNote: "route PR",
+      blockedBy: ["ABC-101"],
+      blockers: [{ key: "ABC-101", onBoard: true, stage: "planning", moved: null, told: false }],
+    });
+
+    await harness.behavior.callAgentTool(
+      REPORT_TOOL,
+      { stage: "in-review", note: "route PR open", prs: [{ repo: "api", number: 57, state: "open" }] },
+      { threadId: "thr_lead1" },
+    );
+    // A report with only PRs keeps the ticket Blocked.
+    await harness.behavior.callAgentTool(REPORT_TOOL, { prs: [{ repo: "api", number: 60, state: "draft" }] }, { threadId: "thr_lead2" });
+    expect((await ticketOf(harness, "ABC-102")).blockers[0]).toMatchObject({
+      stage: "in-review",
+      moved: { stage: "in-review", note: "route PR open" },
+    });
+
+    await harness.behavior.callAgentTool(REPORT_TOOL, { stage: "building" }, { threadId: "thr_lead2" });
+    expect(await ticketOf(harness, "ABC-102")).toMatchObject({ stage: "building", blockedBy: [], blockers: [] });
+    const { detail } = (await harness.behavior.callRpc("board.ticket", { boardId: 1, key: "ABC-102" })) as { detail: TicketDetail };
+    expect(detail.stageEvents.map((e) => e.stage)).toContain("blocked");
+  });
+
+  it("needs a ticket key or a note, and works from the CLI with a reason that is not a ticket", async () => {
+    const { harness } = await setup({ world: noReview });
+    expect(await block(harness, { stage: "blocked" })).toMatchObject({
+      isError: true,
+      content: [{ text: expect.stringContaining("blockedBy") }],
+    });
+    expect((await ticketOf(harness, "ABC-102")).stage).not.toBe("blocked");
+    await harness.behavior.runCli(["report", "ABC-102", "--stage", "blocked", "--note", "waiting for infra access"]);
+    expect(await ticketOf(harness, "ABC-102")).toMatchObject({ stage: "blocked", blockedBy: [], stageNote: "waiting for infra access" });
+    await harness.behavior.runCli(["report", "ABC-102", "--stage", "blocked", "--blocked-by", "ABC-101", "--blocked-by", "XYZ-9"]);
+    expect((await ticketOf(harness, "ABC-102")).blockers.map((b) => [b.key, b.onBoard])).toEqual([
+      ["ABC-101", true],
+      ["XYZ-9", false],
+    ]);
+  });
+
+  it("tells the agent its blocker is Done from the button, and on its own with the board setting", async () => {
+    const { harness, sent } = await setup({ world: noReview });
+    await block(harness);
+    await expect(harness.behavior.callRpc("ticket.tellUnblocked", { boardId: 1, key: "ABC-102" })).rejects.toThrow("is Done yet");
+    await harness.behavior.runCli(["report", "ABC-101", "--stage", "done"]);
+    const { ticket } = (await harness.behavior.callRpc("ticket.tellUnblocked", { boardId: 1, key: "ABC-102" })) as { ticket: Ticket };
+    expect(sent.at(-1)).toMatchObject({
+      threadId: "thr_lead2",
+      text: "[conductor] ABC-101 is Done. You can continue ABC-102; report your next stage when you resume.",
+    });
+    expect(ticket.blockers[0]).toMatchObject({ stage: "done", told: true });
+
+    const auto = await setup({ world: noReview, board: { tellBlockedAgents: true } });
+    await block(auto.harness);
+    await auto.harness.behavior.runCli(["report", "ABC-101", "--stage", "done"]);
+    await auto.harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    await auto.harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    expect(auto.sent.filter((m) => m.threadId === "thr_lead2")).toHaveLength(1);
+  });
+});
+
 describe("review rounds", () => {
   it("drops a round from Code review as soon as it is archived, without waiting for a sweep", async () => {
     const { harness, world } = await setup();

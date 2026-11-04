@@ -190,6 +190,7 @@ export class Conductor {
       note: string | null;
       prs: PullRequest[] | null;
       milestone: string | null;
+      blockedBy?: string[] | null;
     },
   ): Promise<Ticket> {
     if (threadId) return (await this.engineFor(threadId)).reportStage(threadId, input);
@@ -263,6 +264,10 @@ export class Conductor {
 
   plansWaiting(): PlanRound[] {
     return this.store.waitingRounds().filter(this.notDone());
+  }
+
+  tellUnblocked(boardId: number, key: string): Promise<Ticket> {
+    return this.engine(boardId).tellUnblocked(key.trim().toUpperCase());
   }
 
   unarchive(boardId: number, key: string): Promise<Ticket> {

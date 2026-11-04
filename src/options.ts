@@ -54,6 +54,8 @@ export const boardOptionsSchema = z.object({
   archiveDoneThreads: z.boolean().default(false),
   /** Days a Done ticket stays on the board; older and archived ones live in the Done list. */
   doneRecentDays: z.number().int().min(0).max(365).default(3),
+  /** Message a Blocked ticket's agent once every ticket it waits on is Done. */
+  tellBlockedAgents: z.boolean().default(false),
 });
 export type BoardOptions = z.infer<typeof boardOptionsSchema>;
 
@@ -115,7 +117,7 @@ export const RULES: RuleText[] = [
     title: "Report stages",
     summary: "Agents report stage changes and their PR list so the board stays current.",
     text: () =>
-      "Call conductor_report_stage whenever your ticket changes stage and whenever its PR list changes (send the whole list, bottom of the stack first).",
+      "Call conductor_report_stage whenever your ticket changes stage and whenever its PR list changes (send the whole list, bottom of the stack first). If you cannot continue until another ticket lands, report the stage blocked with blockedBy set to that ticket's key and the reason as the note, then end your turn; report your next stage when you resume.",
   },
   {
     id: "planRounds",

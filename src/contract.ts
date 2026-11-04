@@ -15,6 +15,7 @@ export const STAGES = [
   "in-milestone",
   "done",
   "paused",
+  "blocked",
 ] as const;
 export const stageSchema = z.enum(STAGES);
 
@@ -101,6 +102,17 @@ export const ticketArchiveSchema = z.object({
 });
 export type TicketArchive = z.infer<typeof ticketArchiveSchema>;
 
+export const blockerSchema = z.object({
+  key: z.string(),
+  onBoard: z.boolean(),
+  stage: stageSchema.nullable(),
+  /** The blocking ticket's latest history entry after this ticket was blocked. */
+  moved: z.object({ stage: stageSchema.nullable(), note: z.string().nullable(), at: z.number() }).nullable(),
+  /** The blocked agent was already told this blocker is Done. */
+  told: z.boolean(),
+});
+export type Blocker = z.infer<typeof blockerSchema>;
+
 export const ticketSchema = z.object({
   boardId: z.number().int(),
   key: z.string(),
@@ -131,6 +143,11 @@ export const ticketSchema = z.object({
     .nullable(),
   openDecisions: z.number().int(),
   blockingDecisions: z.number().int(),
+  /** What a Blocked ticket waits on: ticket keys, with the reason in `stageNote`. Empty unless Blocked was reported. */
+  blockedBy: z.array(z.string()),
+  blockedAt: z.number().nullable(),
+  /** How each blocking ticket on the board stands now; filled in by the board. */
+  blockers: z.array(blockerSchema),
   /** When the board first saw the ticket Done; null while it is not Done. */
   doneAt: z.number().nullable(),
   archive: ticketArchiveSchema.nullable(),
@@ -289,6 +306,10 @@ export const rpcContract = defineRpcContract({
     output: z.object({ detail: ticketDetailSchema.nullable() }),
   },
   "board.refresh": { input: boardIdInput, output: boardSchema },
+  "ticket.tellUnblocked": {
+    input: z.object({ boardId: z.number().int().positive(), key: z.string().min(1).max(40) }).strict(),
+    output: z.object({ ticket: ticketSchema }),
+  },
   "ticket.unarchive": {
     input: z.object({ boardId: z.number().int().positive(), key: z.string().min(1).max(40) }).strict(),
     output: z.object({ ticket: ticketSchema }),

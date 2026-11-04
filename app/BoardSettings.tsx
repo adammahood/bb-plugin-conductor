@@ -7,7 +7,10 @@ import { rpcContract } from "../src/contract";
 import { agentInstructions, INSTRUCTIONS_LIMIT, RULES, type BoardOptions, type RuleId } from "../src/options";
 import { errorText, useBoards, useGo } from "./hooks";
 
-type TextField = Exclude<keyof BoardOptions, "rules" | "extraRules" | "archiveDoneThreads" | "doneRecentDays">;
+type TextField = Exclude<
+  keyof BoardOptions,
+  "rules" | "extraRules" | "archiveDoneThreads" | "doneRecentDays" | "tellBlockedAgents"
+>;
 
 const FIELDS: { key: TextField; label: string; hint: string; placeholder?: string }[] = [
   { key: "userName", label: "Your name for agents", hint: "How agents refer to you in questions and messages." },
@@ -118,6 +121,25 @@ export function BoardSettings({ boardId }: { boardId: number }) {
             <span className="block text-muted-foreground">
               Once no PR is open, the agents are idle, nothing waits on you and every worktree is clean and pushed. bb
               may then remove the worktree folders; Unarchive on the ticket brings them back.
+            </span>
+          </span>
+        </label>
+      </section>
+
+      <section className="space-y-3" aria-label="Blocked tickets">
+        <h2 className="text-sm font-semibold">Blocked tickets</h2>
+        <label className="flex gap-3 text-sm">
+          <Checkbox
+            checked={options.tellBlockedAgents}
+            onCheckedChange={(checked) => set({ tellBlockedAgents: checked === true })}
+            aria-label="Tell blocked agents automatically when their blocker is Done"
+            className="mt-0.5"
+          />
+          <span>
+            <span className="font-medium">Tell blocked agents automatically when their blocker is Done</span>
+            <span className="block text-muted-foreground">
+              Off: the card shows it and a Tell the agent button. On: the board sends the message once every ticket the
+              agent waits on is Done.
             </span>
           </span>
         </label>

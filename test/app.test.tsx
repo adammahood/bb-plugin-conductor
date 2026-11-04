@@ -45,6 +45,9 @@ const ticket: Ticket = {
   linearStateType: "started",
   doneAt: null,
   archive: null,
+  blockedBy: [],
+  blockedAt: null,
+  blockers: [],
   leadThreadId: "thr_lead1",
   implementerThreadIds: ["thr_impl1"],
   environmentId: "env_1",
@@ -354,6 +357,45 @@ describe("done tickets", () => {
     fireEvent.click(slot.getByRole("button", { name: "Unarchive" }));
     await waitFor(() =>
       expect(slot.inspection.rpcCalls).toContainEqual({ method: "ticket.unarchive", input: { boardId: 1, key: "ABC-112" } }),
+    );
+  });
+});
+
+describe("blocked tickets", () => {
+  const blocked: Ticket = {
+    ...drafted,
+    key: "ABC-105",
+    title: "Crop presets",
+    stage: "blocked",
+    stageSource: "reported",
+    reportedStage: "blocked",
+    stageNote: "route PR",
+    prs: [],
+    blockedBy: ["ABC-104", "OPS-7"],
+    blockedAt: 1,
+    blockers: [
+      { key: "ABC-104", onBoard: true, stage: "done", moved: { stage: "done", note: null, at: Date.now() - 60_000 }, told: false },
+      { key: "OPS-7", onBoard: false, stage: null, moved: null, told: false },
+    ],
+  };
+  const blockedBoard: Board = { ...board, tickets: [ticket, drafted, blocked] };
+
+  it("shows Blocked apart from Building, with what it waits on, and tells the agent when a blocker is Done", async () => {
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1" }, {
+      rpc: { ...rpc([decision], [summary], blockedBoard), "ticket.tellUnblocked": () => ({ ticket: blocked }) },
+    });
+    cleanup = () => slot.lifecycle.unmount();
+    await slot.findByText("Crop presets");
+    const section = slot.getByRole("region", { name: "Blocked" });
+    expect(section.textContent).toContain("Blocked on ABC-104, OPS-7: route PR");
+    expect(section.textContent).toContain("ABC-104 is Done.");
+    expect(slot.getByRole("region", { name: "Building" }).textContent).not.toContain("ABC-105");
+
+    fireEvent.click(within(section).getByRole("button", { name: "ABC-104" }));
+    expect(slot.inspection.navigateCalls.at(-1)).toMatchObject({ options: { subPath: "1/ABC-104" } });
+    fireEvent.click(within(section).getByRole("button", { name: "Tell the agent" }));
+    await waitFor(() =>
+      expect(slot.inspection.rpcCalls).toContainEqual({ method: "ticket.tellUnblocked", input: { boardId: 1, key: "ABC-105" } }),
     );
   });
 });

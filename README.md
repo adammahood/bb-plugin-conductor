@@ -85,14 +85,25 @@ The first rule that matches wins:
    **Building** once you sent comments back, until the agent reports again.
 3. **Plan review** while a plan round waits on you.
 4. **Done** when Linear has the issue in a completed state.
-5. **In review** when a PR is open for review; **In milestone** when all PRs
+5. **Blocked** when an agent reports it, until it reports another stage.
+6. **In review** when a PR is open for review; **In milestone** when all PRs
    are merged; **Done** once those PRs have reached the default branch: merged
    straight into it, or their base branch merged into it by a later release
    PR or as an ancestor. Held and closed PRs are left out. GitHub is asked
    through `gh` on the bb server.
-6. The stage the agent **reported**, if any.
-7. **Draft PRs**, **Building** (an agent is running) or **Planning** from the
+7. The stage the agent **reported**, if any.
+8. **Draft PRs**, **Building** (an agent is running) or **Planning** from the
    facts.
+
+## Blocked tickets
+
+An agent that cannot continue until another ticket lands reports the stage
+`blocked` with the keys it waits on and the reason, then ends its turn (or
+`bb conductor report <key> --stage blocked --blocked-by <key> --note ...`).
+The board shows it in its own Blocked section, says what it waits on and how
+each blocking ticket moved since, and offers **Tell the agent** once one is
+Done. With "Tell blocked agents automatically when their blocker is Done" on,
+the board sends that message itself once every blocking ticket is Done.
 
 ## Done tickets
 

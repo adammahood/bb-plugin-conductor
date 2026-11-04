@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
 import { rpcContract, type Ticket, type TicketDetail } from "../src/contract";
 import { useOpenAgentThread, useOrchestratorTabOnFirstVisit } from "./AgentTabs";
 import { DecisionCard } from "./DecisionCard";
-import { Overview } from "./Overview";
+import { BlockedNote, Overview } from "./Overview";
 import { BoardSettings } from "./BoardSettings";
 import { DoneList } from "./DoneList";
 import {
@@ -159,6 +159,7 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
           {ticket.stageNote && <span>“{ticket.stageNote}”</span>}
         </p>
         {ticket.stage === "done" && <ArchiveLine boardId={boardId} ticket={ticket} />}
+        {ticket.stage === "blocked" && <BlockedNote ticket={ticket} />}
         <div className="flex flex-wrap gap-2">
           {ticket.linearUrl && (
             <Button asChild size="sm" variant="outline">

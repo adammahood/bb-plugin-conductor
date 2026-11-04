@@ -66,6 +66,8 @@ const reportParameters = z.object({
   note: z.string().trim().max(500).optional(),
   milestone: z.string().trim().max(40).optional(),
   prs: z.array(prInput).max(12).optional(),
+  /** With stage blocked: the ticket keys this ticket waits on. */
+  blockedBy: z.array(z.string().trim().min(1).max(40)).max(5).optional(),
 });
 
 const submitPlanParameters = z.object({
@@ -194,6 +196,7 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
     },
     "decisions.list": ({ status, boardId, includeDone }) => ({ decisions: conductor.decisions(status, boardId, includeDone) }),
     "ticket.unarchive": async ({ boardId, key }) => ({ ticket: await conductor.unarchive(boardId, key) }),
+    "ticket.tellUnblocked": async ({ boardId, key }) => ({ ticket: await conductor.tellUnblocked(boardId, key) }),
     "decisions.answer": ({ id, choice, note }) => conductor.answer(id, choice, note || null),
     "decisions.withdraw": ({ id, note }) => conductor.withdraw(id, note || null),
     "decisions.retryDelivery": ({ id }) => conductor.retryDelivery(id),
@@ -242,7 +245,7 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
   const reportTool = {
     description: `Report your ticket's stage (${STAGES.join(", ")}) and its pull requests so the Conductor board stays current. Every field is optional; send what changed.`,
     instructions:
-      "Send the full PR list (bottom of the stack first) whenever it changes, each with its state (draft, open, merged, closed, held); unpushed work is state local with a label. If this thread works on several tickets, pass ticket.",
+      "Send the full PR list (bottom of the stack first) whenever it changes, each with its state (draft, open, merged, closed, held); unpushed work is state local with a label. If this thread works on several tickets, pass ticket. When waiting on another ticket, report stage blocked with blockedBy (its keys) and the reason as note.",
     presentation: {
       label: { pending: "Updating the board", completed: "Updated the board" },
       icon: { glyph: "Layers" },
@@ -258,6 +261,7 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
           note: args.note || null,
           milestone: args.milestone || null,
           prs: args.prs?.map((pr) => toPullRequest(pr, owner)) ?? null,
+          blockedBy: args.blockedBy ?? null,
         });
         return `${ticket.key} is now "${ticket.stage}" on the board.`;
       } catch (error) {
@@ -399,6 +403,11 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
               description: "Thread the ticket is worked in; links it when the thread has other tickets",
             },
             stage: { type: "enum", values: [...STAGES], description: "Reported stage" },
+            "blocked-by": {
+              type: "string",
+              repeatable: true,
+              description: "With --stage blocked: a ticket key it waits on (up to 5)",
+            },
             pr: {
               type: "string",
               repeatable: true,
@@ -420,6 +429,7 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
               note: options.note ?? null,
               milestone: options.milestone ?? null,
               prs: prs && prs.length > 0 ? prs.map((spec) => toPullRequest(parsePrSpec(spec), owner)) : null,
+              blockedBy: (options["blocked-by"] as string[] | undefined) ?? null,
             });
             const prText = ticket.prs.map((pr) => (pr.number ? `#${pr.number}:${pr.state}` : `${pr.label}:local`)).join(" ");
             return {
@@ -520,6 +530,11 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
               description: "Archive a ticket's threads when it's Done",
             },
             "done-recent-days": { type: "string", description: "Days a Done ticket stays on the board (0 to 365)" },
+            "tell-blocked-agents": {
+              type: "enum",
+              values: ["on", "off"],
+              description: "Tell a Blocked agent automatically once every ticket it waits on is Done",
+            },
             on: { type: "enum", values: [...RULE_IDS], repeatable: true, description: "Turn rule switches on" },
             off: { type: "enum", values: [...RULE_IDS], repeatable: true, description: "Turn rule switches off" },
           },
@@ -536,6 +551,7 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
             }
             if (options["archive-done-threads"]) patch.archiveDoneThreads = options["archive-done-threads"] === "on";
             if (options["done-recent-days"] !== undefined) patch.doneRecentDays = Number(options["done-recent-days"]);
+            if (options["tell-blocked-agents"]) patch.tellBlockedAgents = options["tell-blocked-agents"] === "on";
             const board = await conductor.updateBoard(Number(positionals.id), { name: options.name, options: patch });
             return { exitCode: 0, stdout: JSON.stringify(board, null, 2) };
           },

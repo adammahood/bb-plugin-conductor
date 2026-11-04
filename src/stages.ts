@@ -48,6 +48,7 @@ export function decideStage(facts: StageFacts): StageDecision {
   if (facts.reviewRound === "with-agent" && !facts.reportedAfterReview) return { stage: "building", source: "inferred" };
   if (facts.planRound === "open") return { stage: "plan-review", source: "inferred" };
   if (facts.trackerDone) return { stage: "done", source: "inferred" };
+  if (reported === "blocked") return { stage: "blocked", source: "reported" };
   // Plan review means a round waits on the user; without one, a plan-review report reads as planning.
   if (reported === "plan-review" && facts.planRound !== "approved" && facts.prs.length === 0) {
     return { stage: "planning", source: "inferred" };
