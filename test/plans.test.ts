@@ -20,6 +20,7 @@ const round = (overrides: Partial<PlanRound> = {}): PlanRound => ({
   decidedAt: 2,
   deliveredAt: null,
   deliveryError: null,
+  fileChanged: false,
   ...overrides,
 });
 

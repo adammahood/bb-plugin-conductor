@@ -31,6 +31,7 @@ const round: PlanRound = {
   decidedAt: null,
   deliveredAt: null,
   deliveryError: null,
+  fileChanged: false,
 };
 
 const ticket: Ticket = {

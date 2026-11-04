@@ -19,6 +19,7 @@ const round = (id: number, boardId: number, submittedAt: number, status: PlanRou
   decidedAt: null,
   deliveredAt: null,
   deliveryError: null,
+  fileChanged: false,
 });
 
 const decision = (id: number, boardId: number, status: Decision["status"] = "open"): Decision => ({

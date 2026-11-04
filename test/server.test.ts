@@ -502,7 +502,7 @@ describe("stage reports", () => {
     const { harness } = await setup();
     await harness.behavior.callAgentTool(REPORT_TOOL, { stage: "plan_review" }, { threadId: "thr_lead2" });
     let board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
-    expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "plan-review", stageSource: "reported" });
+    expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "planning", reportedStage: "plan-review" });
 
     const seeded = await harness.behavior.runCli([
       "report", "ABC-103", "--thread", "thr_lead1", "--milestone", "M2",
@@ -946,6 +946,71 @@ describe("plan review", () => {
     writeFileSync(file, "# plan, revised");
     board = (await harness.behavior.callRpc("board.refresh", { boardId: 1 })) as Board;
     expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "plan-review", planRound: { n: 2, status: "open" } });
+  });
+
+  it("never lets the plans folder supersede a submitted round; an edited file only marks it changed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pb-plans-"));
+    const file = join(dir, "2026-11-04-abc101-avatars.md");
+    const { harness, world } = await setup({ ...noReview, board: { plansDir: dir } });
+    writeFileSync(file, PLAN);
+    world.files[file] = PLAN;
+    await submit(harness, { path: file });
+
+    for (const edit of ["# Avatars, edit 1", "# Avatars, edit 2"]) {
+      writeFileSync(file, edit);
+      world.files[file] = edit;
+      await harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    }
+    const all = await rounds(harness);
+    expect(all).toEqual([expect.objectContaining({ n: 1, source: "submitted", status: "open", fileChanged: true })]);
+    const got = (await harness.behavior.callRpc("plans.get", { roundId: all[0]!.id })) as { content: string };
+    expect(got.content).toBe(PLAN);
+    const board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+    expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ stage: "plan-review", planRound: { n: 1 } });
+
+    // Only the agent's own resubmission opens the next round.
+    await submit(harness, { path: file });
+    expect((await rounds(harness)).map((r) => [r.n, r.status, r.fileChanged])).toEqual([
+      [2, "open", false],
+      [1, "superseded", true],
+    ]);
+  });
+
+  it("refreshes an unmarked inferred round in place, and orchestrator relays do not close it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pb-plans-"));
+    const file = join(dir, "2026-11-04-abc102-image-sizes.md");
+    writeFileSync(file, "# plan");
+    const { harness, world } = await setup({ board: { plansDir: dir } });
+    const ticketRounds = async () =>
+      ((await harness.behavior.callRpc("plans.list", { boardId: 1, key: "ABC-102" })) as { rounds: PlanRound[] }).rounds;
+
+    writeFileSync(file, "# plan, edited");
+    world.replies.thr_lead2 = [
+      { createdAt: Date.now() + 60_000, data: { initiator: "user", senderThreadId: ORCH, source: "tell" } },
+    ];
+    await harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    let all = await ticketRounds();
+    expect(all).toEqual([expect.objectContaining({ n: 1, source: "inferred", status: "open", fileChanged: false })]);
+    expect(((await harness.behavior.callRpc("plans.get", { roundId: all[0]!.id })) as { content: string }).content).toBe(
+      "# plan, edited",
+    );
+
+    // With marks on it, the round keeps the text they point at.
+    await harness.behavior.callRpc("plans.mark.save", {
+      roundId: all[0]!.id,
+      kind: "comment",
+      quote: "plan",
+      startLine: 1,
+      endLine: 1,
+      comment: "Say which sizes",
+    });
+    writeFileSync(file, "# plan, edited again");
+    await harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    all = await ticketRounds();
+    expect(all).toEqual([expect.objectContaining({ n: 1, status: "open", fileChanged: true })]);
+    expect(((await harness.behavior.callRpc("plans.get", { roundId: all[0]!.id })) as { content: string }).content).toBe(
+      "# plan, edited",
+    );
   });
 
   it("leaves tickets that moved past planning alone, and closes a stale inferred round", async () => {

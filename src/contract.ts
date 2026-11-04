@@ -67,6 +67,8 @@ export const planRoundSchema = z.object({
   decidedAt: z.number().nullable(),
   deliveredAt: z.number().nullable(),
   deliveryError: z.string().nullable(),
+  /** The plan file no longer matches this round's copy; the agent has not submitted it again. */
+  fileChanged: z.boolean(),
 });
 export type PlanRound = z.infer<typeof planRoundSchema>;
 

@@ -140,6 +140,7 @@ export class BoardEngine {
     this.facts.threads = threads;
     await this.refreshReviews(ids);
     await this.inferPlanRounds(this.store.listTickets());
+    await this.checkSubmittedPlans(this.store.listTickets());
     await this.refreshLandings(this.store.listTickets());
   }
 
@@ -223,24 +224,37 @@ export class BoardEngine {
       return;
     }
     for (const ticket of tickets) {
-      const latest = this.store.planRounds(ticket.key)[0] ?? null;
+      const rounds = this.store.planRounds(ticket.key);
+      const latest = rounds[0] ?? null;
       // Only a ticket still planning can be waiting on a plan; a stale inferred round closes.
       const planning = ticket.prs.length === 0 && PLANNING_STAGES.has(ticket.reportedStage);
       if (!planning) {
         if (latest?.status === "open" && latest.source === "inferred") this.store.root.closeRound(latest.id, "withdrawn");
         continue;
       }
+      // Once the agent submits plans itself, the folder is only a copy of its work.
+      if (rounds.some((round) => round.source === "submitted")) continue;
       const tag = `-${ticket.key.toLowerCase().replace(/-/g, "")}-`;
       const file = files.filter((name) => name.includes(tag)).sort().at(-1);
       if (!file) continue;
       try {
-        if (latest?.status === "open" && latest.source === "inferred") {
-          const repliedAt = await this.lastReplyAt(ticket.leadThreadId);
-          if (repliedAt !== null && repliedAt > latest.submittedAt) this.store.root.closeRound(latest.id, "withdrawn");
+        let open = latest?.status === "open" ? latest : null;
+        if (open) {
+          const repliedAt = await this.lastUserReplyAt(ticket.leadThreadId);
+          if (repliedAt !== null && repliedAt > open.submittedAt) {
+            this.store.root.closeRound(open.id, "withdrawn");
+            open = null;
+          }
         }
         if (isRunning(this.facts.statuses.get(ticket.leadThreadId))) continue;
         const content = await readFile(join(dir, file), "utf8");
         const sha256 = createHash("sha256").update(content).digest("hex");
+        if (open) {
+          // Edits refresh an unmarked round in place; a marked one keeps its copy and says the file moved on.
+          if (open.marks === 0 && open.sha256 !== sha256) this.store.root.replaceRoundContent(open.id, content, sha256);
+          else this.store.root.setRoundFileSha(open.id, sha256 === open.sha256 ? null : sha256);
+          continue;
+        }
         if (latest?.sha256 === sha256) continue;
         if (!(await this.noCommits(ticket.environmentId))) continue;
         this.store.openRound({
@@ -268,6 +282,23 @@ export class BoardEngine {
     input: { path: string; ticket: string | null; summary: string | null },
   ): Promise<{ round: PlanRound; ticket: Ticket }> {
     const ticketKey = await this.ticketFor(threadId, input.ticket);
+    const { path, content } = await this.readPlan(threadId, input.path);
+    const round = this.store.openRound({
+      ticketKey,
+      threadId,
+      path,
+      content,
+      sha256: createHash("sha256").update(content).digest("hex"),
+      source: "submitted",
+      summary: input.summary,
+    });
+    this.store.reportStage({ ticketKey, threadId, stage: "plan-review", note: input.summary, prs: null, milestone: null });
+    this.changed();
+    return { round, ticket: this.withStage(this.store.getTicket(ticketKey)!) };
+  }
+
+  /** Reads a plan file on the agent's own machine, confined to its workspace, the plans folder or its storage. */
+  private async readPlan(threadId: string, requested: string): Promise<{ path: string; content: string }> {
     const thread = await this.bb.sdk.threads.get({ threadId });
     const environmentId = (thread as { environmentId?: string | null }).environmentId ?? null;
     const environment = environmentId
@@ -275,7 +306,7 @@ export class BoardEngine {
       : null;
     const storage = await this.bb.sdk.threads.storageLocation({ threadId }).catch(() => null);
     const plansDir = this.config().plansDir;
-    const checked = checkPlanPath(input.path, [environment?.path, storage?.storageRootPath, plansDir]);
+    const checked = checkPlanPath(requested, [environment?.path, storage?.storageRootPath, plansDir]);
     if (!checked.ok) throw new Error(checked.reason);
     const hostId =
       checked.root === plansDir
@@ -287,22 +318,26 @@ export class BoardEngine {
     const { content: raw, contentEncoding, sizeBytes } = file as { content: string; contentEncoding?: string; sizeBytes?: number };
     if ((sizeBytes ?? raw.length) > PLAN_MAX_BYTES) throw new Error("The plan is larger than 1 MB.");
     const content = contentEncoding === "base64" ? Buffer.from(raw, "base64").toString("utf8") : raw;
-    const round = this.store.openRound({
-      ticketKey,
-      threadId,
-      path: checked.path,
-      content,
-      sha256: createHash("sha256").update(content).digest("hex"),
-      source: "submitted",
-      summary: input.summary,
-    });
-    this.store.reportStage({ ticketKey, threadId, stage: "plan-review", note: input.summary, prs: null, milestone: null });
-    this.changed();
-    return { round, ticket: this.withStage(this.store.getTicket(ticketKey)!) };
+    return { path: checked.path, content };
   }
 
-  private async lastReplyAt(threadId: string): Promise<number | null> {
-    const orchestrator = this.config().orchestratorThreadId;
+  /** Notes when a submitted plan's file changed after it was sent; the round keeps the copy the user reviews. */
+  private async checkSubmittedPlans(tickets: Ticket[]): Promise<void> {
+    for (const ticket of tickets) {
+      const round = ticket.planRound;
+      if (round?.status !== "open" || round.source !== "submitted") continue;
+      try {
+        const { content } = await this.readPlan(round.threadId, round.path);
+        const sha256 = createHash("sha256").update(content).digest("hex");
+        this.store.root.setRoundFileSha(round.id, sha256 === round.sha256 ? null : sha256);
+      } catch {
+        // A moved or unreadable file leaves the round as it was.
+      }
+    }
+  }
+
+  /** When the user last wrote in the thread themselves; relays from other threads do not count. */
+  private async lastUserReplyAt(threadId: string): Promise<number | null> {
     const events = await this.bb.sdk.threads.events.list({
       threadId,
       order: "desc",
@@ -311,8 +346,7 @@ export class BoardEngine {
     });
     for (const event of events) {
       const data = (event.data ?? {}) as { initiator?: string; senderThreadId?: string | null; source?: string };
-      const fromUser = data.initiator === "user" && !data.senderThreadId && data.source !== "spawn";
-      if (fromUser || data.senderThreadId === orchestrator) return event.createdAt;
+      if (data.initiator === "user" && !data.senderThreadId && data.source !== "spawn") return event.createdAt;
     }
     return null;
   }

@@ -68,7 +68,9 @@ describe("decideStage", () => {
   });
 
   it("keeps a reported stage until the facts move past it", () => {
-    expect(decideStage(facts({ reported: "plan-review" }))).toMatchObject({ stage: "plan-review", source: "reported" });
+    // Plan review needs a round waiting on the user.
+    expect(decideStage(facts({ reported: "plan-review" }))).toMatchObject({ stage: "planning", source: "inferred" });
+    expect(decideStage(facts({ reported: "plan-review", planRound: "open" })).stage).toBe("plan-review");
     expect(decideStage(facts({ reported: "in-review", prs: [pr(1, "draft")] })).stage).toBe("in-review");
     expect(decideStage(facts({ reported: "planning", prs: [pr(1, "open")] }))).toMatchObject({ stage: "in-review", source: "inferred" });
     expect(decideStage(facts({ reported: "done" })).stage).toBe("done");

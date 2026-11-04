@@ -78,6 +78,11 @@ export function PlanReview({ boardId, ticketKey, roundN }: { boardId: number; ti
           </span>
           <span>sent {ago(current.submittedAt)}</span>
           {current.source === "inferred" && <span>found in the plans folder</span>}
+          {current.status === "open" && current.fileChanged && (
+            <span className="text-[var(--warning)]">
+              plan file changed since this round; you review the copy sent, and a new submission opens the next round
+            </span>
+          )}
           <span className="truncate text-xs" title={current.path}>
             {current.path}
           </span>
