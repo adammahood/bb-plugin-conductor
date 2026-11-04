@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- Archiving no longer keeps a merged ticket as "branch not on the remote" after GitHub deleted its branch: when the worktree's commit is the head of one of the ticket's merged PRs, it counts as pushed. Commits GitHub never received still keep the ticket.
+
 ## 0.4.0
 
 - Done tickets leave the board after a few days (3 by default) or once their threads are archived, and the sidebar lists only open tickets. A filterable Done list, from the board or the sidebar's "Done (N)" row, keeps every Done ticket with its history.
