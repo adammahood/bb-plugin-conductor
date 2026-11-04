@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2
+
+- A submitted plan round is never superseded by the plans folder. When the agent edits the file after submitting, the round keeps the copy you review and says the file changed; the agent's next submission opens the next round.
+- The plans folder opens rounds only for tickets whose agent never submitted a plan. Editing that file refreshes the open round in place, unless you already marked it up.
+- Messages relayed from other threads, such as the orchestrator's, no longer close a round. Only your decision, your own reply in the agent's thread (for a round found in the plans folder) or the agent's resubmission does.
+- A ticket shows Plan review only while a round waits on you; a plan-review report without one reads as Planning.
+
 ## 0.4.1
 
 - Archiving no longer keeps a merged ticket as "branch not on the remote" after GitHub deleted its branch: when the worktree's commit is the head of one of the ticket's merged PRs, it counts as pushed. Commits GitHub never received still keep the ticket.
