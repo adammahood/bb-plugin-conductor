@@ -496,7 +496,8 @@ export class BoardEngine {
         const name = outsider.id === orchestrator ? "the orchestrator" : (key ?? `"${outsider.title ?? outsider.id}"`);
         return `workspace shared with ${name}`;
       }
-      const reason = await workspaceBlocker(this.bb, environmentId);
+      const prs = group.flatMap((t) => t.prs);
+      const reason = await workspaceBlocker(this.bb, environmentId, (sha) => this.landings.mergedHead(prs, sha));
       if (reason) return reason;
     }
     return null;

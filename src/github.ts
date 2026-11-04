@@ -36,8 +36,8 @@ interface BranchState {
 }
 
 export class Landings {
-  /** Base branch and merge time of each merged PR, by `owner/repo#n`. */
-  private readonly prs = new Map<string, { base: string; mergedAt: number }>();
+  /** Base branch, merge time and head commit of each merged PR, by `owner/repo#n`. */
+  private readonly prs = new Map<string, { base: string; mergedAt: number; head: string }>();
   private readonly defaults = new Map<string, string>();
   private readonly branches = new Map<string, BranchState>();
   /** PRs known to be in the default branch; that never changes back. */
@@ -81,11 +81,7 @@ export class Landings {
       if (pr.state !== "merged" || !slug || pr.number === null || this.prLanded(pr)) continue;
       try {
         const id = `${slug}#${pr.number}`;
-        if (!this.prs.has(id)) {
-          const out = await this.gh(["api", `repos/${slug}/pulls/${pr.number}`, "--jq", '[.base.ref, .merged_at // ""] | @tsv']);
-          const [base = "", mergedAt = ""] = out.trim().split("\t");
-          this.prs.set(id, { base, mergedAt: time(mergedAt) ?? this.now() });
-        }
+        await this.readPr(slug, pr.number);
         if (!this.defaults.has(slug)) {
           this.defaults.set(slug, (await this.gh(["api", `repos/${slug}`, "--jq", ".default_branch"])).trim());
         }
@@ -103,6 +99,35 @@ export class Landings {
         }
       }
     }
+  }
+
+  private async readPr(slug: string, number: number): Promise<{ base: string; mergedAt: number; head: string }> {
+    const id = `${slug}#${number}`;
+    const known = this.prs.get(id);
+    if (known) return known;
+    const out = await this.gh(["api", `repos/${slug}/pulls/${number}`, "--jq", '[.base.ref, .merged_at // "", .head.sha] | @tsv']);
+    const [base = "", mergedAt = "", head = ""] = out.trim().split("\t");
+    const info = { base, mergedAt: time(mergedAt) ?? this.now(), head };
+    this.prs.set(id, info);
+    return info;
+  }
+
+  /**
+   * Whether GitHub merged this commit as the head of one of these PRs: then a
+   * worktree sitting on it has nothing unpushed, even after GitHub deleted the
+   * branch.
+   */
+  async mergedHead(prs: PullRequest[], sha: string): Promise<boolean> {
+    for (const pr of prs) {
+      const slug = repoSlug(pr);
+      if (pr.state !== "merged" || !slug || pr.number === null) continue;
+      try {
+        if ((await this.readPr(slug, pr.number)).head === sha) return true;
+      } catch (error) {
+        this.warn(`gh ${slug}#${pr.number}: ${String(error).slice(0, 300)}`);
+      }
+    }
+    return false;
   }
 
   /** Release PRs from the branch into the default branch (possibly squashed), and ancestry. */

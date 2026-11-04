@@ -665,6 +665,26 @@ describe("done tickets", () => {
     }
   });
 
+  it.each([
+    ["abc", null],
+    ["fff", "branch not on the remote"],
+  ])("asks GitHub when the remote branch is gone: merged PR head %s", async (head, reason) => {
+    const { harness, calls } = await setup({
+      world: { ...noReview, workspaces: { env_thr_impl1: { noUpstream: true } } },
+      board: archiving,
+      github: { "repos/acme/web/pulls/40": `m1-avatars\t2026-03-02T10:00:00Z\t${head}` },
+    });
+    await done(harness, "thr_lead1");
+    await refresh(harness);
+    const { archive } = await ticketOf(harness, "ABC-101");
+    if (reason) {
+      expect(archive).toMatchObject({ state: "kept", reason });
+      expect(calls.archive).toEqual([]);
+    } else {
+      expect(archive).toMatchObject({ state: "archived" });
+    }
+  });
+
   it("keeps a ticket while an agent runs", async () => {
     const children = {
       [ORCH]: [thread("thr_lead1", ORCH, "ABC-101 avatar uploads", { status: "active" })],

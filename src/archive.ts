@@ -26,7 +26,7 @@ interface Status {
   outcome: string;
   workspace?: {
     branch: { defaultBranch: string };
-    checkout: { kind: string; branchName?: string | null };
+    checkout: { kind: string; branchName?: string | null; headSha?: string | null };
     workingTree: { hasUncommittedChanges: boolean };
     mergeBase: {
       baseRef: string | null;
@@ -40,10 +40,15 @@ interface Status {
 /**
  * Why a worktree is not safe to retire: uncommitted changes, commits its
  * remote branch lacks, or no way to tell. A missing remote branch reads as
- * "0 ahead" with no base ref, so it only passes when the work is already in
- * the default branch.
+ * "0 ahead" with no base ref, so it only passes when GitHub merged the
+ * worktree's commit as a PR head, or the work is already in the default
+ * branch.
  */
-export async function workspaceBlocker(bb: BbPluginApi, environmentId: string): Promise<string | null> {
+export async function workspaceBlocker(
+  bb: BbPluginApi,
+  environmentId: string,
+  mergedHead: (sha: string) => Promise<boolean>,
+): Promise<string | null> {
   const status = (mergeBaseBranch?: string) =>
     bb.sdk.environments.status({ environmentId, ...(mergeBaseBranch ? { mergeBaseBranch } : {}) }) as Promise<Status>;
   try {
@@ -56,6 +61,8 @@ export async function workspaceBlocker(bb: BbPluginApi, environmentId: string): 
       const upstream = (await status(`origin/${name}`)).workspace?.mergeBase;
       if (upstream?.baseRef) return upstream.aheadCount > 0 ? plural(upstream.aheadCount, "unpushed commit") : null;
     }
+    // GitHub deletes merged branches, and the local default branch may not be fetched since.
+    if (checkout.headSha && (await mergedHead(checkout.headSha))) return null;
     const main = (await status(`origin/${branch.defaultBranch}`)).workspace?.mergeBase;
     if (main?.baseRef && main.squashMergeCheckComplete && !main.hasCommittedUnmergedChanges) return null;
     return "branch not on the remote";
