@@ -25,6 +25,7 @@ export { rpcContract };
 export const ASK_TOOL = "conductor_ask_decision";
 export const REPORT_TOOL = "conductor_report_stage";
 export const SUBMIT_PLAN_TOOL = "conductor_submit_plan";
+export const WITHDRAW_PLAN_TOOL = "conductor_withdraw_plan";
 /** Phase Board's tool names, kept so agents started before the rename keep working until they restart. */
 export const LEGACY_TOOLS = { ask: "pb_ask_decision", report: "pb_report_stage" } as const;
 export const SKILL = "conductor";
@@ -74,6 +75,11 @@ const submitPlanParameters = z.object({
   path: z.string().trim().min(1).max(1000),
   ticket: z.string().trim().max(40).optional(),
   summary: z.string().trim().max(500).optional(),
+});
+
+const withdrawPlanParameters = z.object({
+  ticket: z.string().trim().max(40).optional(),
+  note: z.string().trim().max(500).optional(),
 });
 
 const metadataSchema = z.object({ boardId: z.number().int(), ticketKey: z.string(), role: roleSchema });
@@ -227,7 +233,7 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
     parameters: askParameters,
     async execute(args: z.infer<typeof askParameters>, { threadId }: { threadId: string }) {
       try {
-        const { decision, userName } = await conductor.ask(threadId, {
+        const { decision, withdrawn, userName } = await conductor.ask(threadId, {
           question: args.question,
           options: args.options.map((o) => ({ label: o.label, detail: o.detail || null })),
           recommendation: args.recommendation || null,
@@ -235,7 +241,10 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
           blocking: args.blocking,
           ticket: args.ticket || null,
         });
-        return askedNotice(decision, userName);
+        const notice = askedNotice(decision, userName);
+        return withdrawn
+          ? `${notice} Plan round ${withdrawn.n} was withdrawn from the board; once the answer is folded into the plan, submit it again as a new round.`
+          : notice;
       } catch (error) {
         return toolError(error);
       }
@@ -295,6 +304,25 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
     },
   });
 
+  bb.agents.registerTool({
+    name: WITHDRAW_PLAN_TOOL,
+    description:
+      "Take your open plan round off the user's Conductor board, for example when the plan needs an answer or a rework before review. The ticket goes back to planning; submit the plan again when it is ready.",
+    presentation: {
+      label: { pending: "Withdrawing the plan", completed: "Withdrew the plan" },
+      icon: { glyph: "FileText" },
+    },
+    parameters: withdrawPlanParameters,
+    async execute(args, { threadId }) {
+      try {
+        const round = await conductor.withdrawPlan(threadId, { ticket: args.ticket || null, note: args.note || null });
+        return `Plan round ${round.n} for ${round.ticketKey} is withdrawn. Submit the plan again with ${SUBMIT_PLAN_TOOL} when it is ready.`;
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  });
+
   bb.agents.registerTool({ name: ASK_TOOL, ...askTool });
   bb.agents.registerTool({ name: REPORT_TOOL, ...reportTool });
   // Never offered to new sessions (configure leaves them out); they only answer calls from older ones.
@@ -308,7 +336,7 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
     const board = meta.success ? store.getBoard(meta.data.boardId) : null;
     if (!meta.success || isSideChat || !board) return { tools: [], skills: [SETUP_SKILL] };
     return {
-      tools: [...(board.options.rules.askDecisions ? [ASK_TOOL] : []), REPORT_TOOL, SUBMIT_PLAN_TOOL],
+      tools: [...(board.options.rules.askDecisions ? [ASK_TOOL] : []), REPORT_TOOL, SUBMIT_PLAN_TOOL, WITHDRAW_PLAN_TOOL],
       skills: [SKILL],
       instructions: agentInstructions(board, { key: meta.data.ticketKey, role: meta.data.role }, { codeReview: conductor.integrationsNow().codeReview }),
     };
@@ -373,6 +401,19 @@ export default async function plugin(bb: BbPluginApi, deps: { gh?: Gh } = {}) {
             const decision = await conductor.answer(parseDecisionId(positionals.id as string), choice, options.note ?? null);
             const sent = decision.deliveryError ? `not delivered: ${decision.deliveryError}` : "sent to the agent";
             return { exitCode: decision.deliveryError ? 1 : 0, stdout: `${decision.ref} answered, ${sent}.` };
+          },
+        }),
+        "withdraw-plan": cliCommand({
+          summary: "Withdraw a ticket's open plan round; the ticket goes back to planning",
+          positionals: [{ name: "ticket", description: "Ticket key, e.g. ABC-123", required: true }],
+          options: { ...boardOption, note: { type: "string", description: "Why (max 500 chars), kept in the ticket's history" } },
+          async run({ positionals, options }) {
+            const round = await conductor.withdrawPlan(null, {
+              boardId: options.board,
+              ticket: positionals.ticket as string,
+              note: options.note ?? null,
+            });
+            return { exitCode: 0, stdout: `Plan round ${round.n} for ${round.ticketKey} withdrawn.` };
           },
         }),
         withdraw: cliCommand({

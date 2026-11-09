@@ -40,6 +40,8 @@ new context.
 
 ## Sending a plan for review: `conductor_submit_plan`
 
+- Decisions first, then the plan. The tool refuses a plan while your ticket has
+  open decisions; wait for the answers, fold them into the plan, then submit.
 - Write the plan to a Markdown file in your workspace, the board's plans
   folder or your thread's storage folder, then call the tool with its absolute
   `path` (and `summary`, one line, if useful). End your turn right after.
@@ -59,19 +61,26 @@ I've reviewed this plan and have 2 pieces of feedback:
 ## 2. (line 20) Remove: "Add a CDN purge job"
 ```
 
-- On changes requested, revise the same file and submit it again; each
-  submission is a new round. On approval, notes listed under "non-blocking
-  notes" are guidance; start building and report the stage `building`.
+- On changes requested, or when an answer changes the plan, revise the same
+  file and submit it again; each submission is a new round. On approval, notes
+  listed under "non-blocking notes" are guidance; start building and report the
+  stage `building`.
+- Asking a decision while a round is open withdraws that round from the board.
+  To take a round back yourself (the plan needs rework before review), call
+  `conductor_withdraw_plan` with an optional `note`; then submit again when
+  ready.
 
 ## Reporting progress: `conductor_report_stage`
 
 Stages: `planning`, `plan-review`, `building`, `code-review`, `draft-pr`,
-`in-review`, `in-milestone`, `done`, `paused`. Every field is optional; send
-what changed.
+`in-review`, `in-milestone`, `done`, `paused`, `blocked`. Every field is
+optional; send what changed.
 
 - `stage`: `plan-review` while a plan waits on the user, `building` once it is
   approved, `paused` when you stop on purpose, `done` for work with no PR when
-  it is finished. The board also reads PR states, review rounds and whether you
+  it is finished, `blocked` when you cannot continue until another ticket
+  lands: set `blockedBy` to its keys (up to 5) and the reason as `note`, then
+  end your turn. Report your next stage when you resume. The board also reads PR states, review rounds and whether you
   are running, so report what those cannot show.
 - `prs`: the ticket's full PR list, bottom of the stack first. Each has `repo`,
   `number`, `url`, optional `base`, and `state` (`draft`, `open`, `merged`,

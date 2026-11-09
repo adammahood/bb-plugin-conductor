@@ -176,9 +176,18 @@ export class Conductor {
   async ask(
     threadId: string,
     input: Omit<NewDecision, "ticketKey" | "threadId"> & { ticket?: string | null },
-  ): Promise<{ decision: Decision; userName: string }> {
+  ): Promise<{ decision: Decision; withdrawn: PlanRound | null; userName: string }> {
     const engine = await this.engineFor(threadId);
-    return { decision: await engine.ask(threadId, input), userName: engine.store.record().options.userName };
+    return { ...(await engine.ask(threadId, input)), userName: engine.store.record().options.userName };
+  }
+
+  /** From an agent's thread, or from the CLI with `threadId` null. */
+  async withdrawPlan(threadId: string | null, input: { boardId?: number; ticket: string | null; note: string | null }): Promise<PlanRound> {
+    if (threadId) return (await this.engineFor(threadId)).withdrawPlan(threadId, input.ticket, input.note);
+    const boards = this.store.listBoards();
+    const boardId = input.boardId ?? (boards.length === 1 ? boards[0]!.id : undefined);
+    if (boardId === undefined) throw new Error("Several boards exist; pass the board id.");
+    return this.engine(boardId).withdrawPlan(null, input.ticket, input.note);
   }
 
   async reportStage(

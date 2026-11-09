@@ -284,6 +284,13 @@ export class BoardEngine {
     input: { path: string; ticket: string | null; summary: string | null },
   ): Promise<{ round: PlanRound; ticket: Ticket }> {
     const ticketKey = await this.ticketFor(threadId, input.ticket);
+    // A plan sent while questions are open would be reviewed before the answers are in it.
+    const open = this.store.listDecisions({ ticketKey, status: "open" });
+    if (open.length > 0) {
+      throw new Error(
+        `${ticketKey} has open decisions (${open.map((d) => d.ref).join(", ")}). Wait for the answers, fold them into the plan, then submit it.`,
+      );
+    }
     const { path, content } = await this.readPlan(threadId, input.path);
     const round = this.store.openRound({
       ticketKey,
@@ -784,15 +791,50 @@ export class BoardEngine {
     return wanted;
   }
 
+  /**
+   * A new question means the plan in review is not final, so an open round is
+   * withdrawn rather than reviewed before the answer is folded in.
+   */
   async ask(
     threadId: string,
     input: Omit<NewDecision, "ticketKey" | "threadId"> & { ticket?: string | null },
-  ): Promise<Decision> {
+  ): Promise<{ decision: Decision; withdrawn: PlanRound | null }> {
     const { ticket, ...rest } = input;
     const ticketKey = await this.ticketFor(threadId, ticket ?? null);
     const decision = this.store.addDecision({ ...rest, ticketKey, threadId });
+    const withdrawn = this.closeOpenRound(ticketKey, threadId, `the agent asked ${decision.ref}`);
     this.changed();
-    return decision;
+    return { decision, withdrawn };
+  }
+
+  /** Takes a plan round off the board at the agent's or the user's request; the ticket goes back to Planning. */
+  async withdrawPlan(threadId: string | null, key: string | null, note: string | null): Promise<PlanRound> {
+    let ticketKey: string;
+    if (threadId) {
+      ticketKey = await this.ticketFor(threadId, key);
+    } else {
+      ticketKey = (key ?? "").trim().toUpperCase();
+      if (!this.store.getTicket(ticketKey)) throw new Error(`No ticket ${ticketKey} on the board.`);
+    }
+    const round = this.closeOpenRound(ticketKey, threadId, note);
+    if (!round) throw new Error(`No plan round is open for ${ticketKey}.`);
+    this.changed();
+    return round;
+  }
+
+  private closeOpenRound(ticketKey: string, threadId: string | null, why: string | null): PlanRound | null {
+    const open = this.store.planRounds(ticketKey).find((r) => r.status === "open");
+    if (!open) return null;
+    const round = this.store.root.closeRound(open.id, "withdrawn");
+    this.store.reportStage({
+      ticketKey,
+      threadId,
+      stage: "planning",
+      note: `Plan round ${open.n} withdrawn${why ? `: ${why}` : ""}`,
+      prs: null,
+      milestone: null,
+    });
+    return round;
   }
 
   /** From an agent's thread, or from the CLI with `threadId` null for a known ticket. */

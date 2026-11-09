@@ -22,8 +22,10 @@ answer goes straight back to the agent that asked.
   read it rendered, select text to comment on it, remove it or replace it,
   add an overall comment, and approve or request changes. The marks go back
   to the agent as one message, and each round keeps its own copy with a diff
-  against the round before. A round stays open until you decide it or the
-  agent submits again; if the agent edits the file in between, the round says
+  against the round before. Agents ask their decisions before submitting (a
+  plan is refused while the ticket has open decisions), and asking one while
+  a round is open withdraws it; agents can also withdraw a round themselves.
+  A round stays open until you decide it or the agent submits again; if the agent edits the file in between, the round says
   so. With a plans folder set, a plan found there opens a round on its own,
   but only for tickets whose agent never submitted one.
 - **The orchestrator beside the board.** The side panel has an Orchestrator
@@ -128,7 +130,7 @@ the board sends that message itself once every blocking ticket is Done.
 
 ## CLI
 
-`bb conductor tickets | decisions | answer | withdraw | report | unarchive | sweep`,
+`bb conductor tickets | decisions | answer | withdraw | report | withdraw-plan | unarchive | sweep`,
 `bb conductor board list | create | set | remove`, and
 `bb conductor import-phase-board`. Run any with `--help`.
 

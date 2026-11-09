@@ -7,7 +7,7 @@ import { mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import plugin, { ASK_TOOL, LEGACY_TOOLS, REPORT_TOOL, SETUP_SKILL, SKILL, SUBMIT_PLAN_TOOL } from "../server";
+import plugin, { ASK_TOOL, LEGACY_TOOLS, REPORT_TOOL, SETUP_SKILL, SKILL, SUBMIT_PLAN_TOOL, WITHDRAW_PLAN_TOOL } from "../server";
 import type { Board, Decision, PlanMark, PlanRound, Ticket, TicketDetail } from "../src/contract";
 
 const ORCH = "thr_orch";
@@ -1020,6 +1020,56 @@ describe("plan review", () => {
     expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "plan-review", planRound: { n: 2, status: "open" } });
   });
 
+  it("refuses a plan while the ticket has open decisions, and takes it once they are answered", async () => {
+    const { harness, world } = await setup(noReview);
+    world.files[path] = PLAN;
+    await ask(harness, "thr_lead1");
+    expect(await submit(harness)).toMatchObject({
+      isError: true,
+      content: [{ text: "ABC-101 has open decisions (D-1). Wait for the answers, fold them into the plan, then submit it." }],
+    });
+    expect(await rounds(harness)).toEqual([]);
+    await harness.behavior.callRpc("decisions.answer", { id: 1, choice: "AvatarURL" });
+    await submit(harness);
+    expect(await rounds(harness)).toEqual([expect.objectContaining({ n: 1, status: "open" })]);
+  });
+
+  it("withdraws the open round when the agent asks a decision, and says so", async () => {
+    const { harness, world } = await setup(noReview);
+    world.files[path] = PLAN;
+    await submit(harness);
+    const result = await ask(harness, "thr_lead1", { blocking: false });
+    expect(result).toContain("Plan round 1 was withdrawn from the board");
+    expect(await rounds(harness)).toEqual([expect.objectContaining({ n: 1, status: "withdrawn" })]);
+    const board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+    expect(board.plansWaiting).toEqual([]);
+    expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ stage: "planning" });
+    const { detail } = (await harness.behavior.callRpc("board.ticket", { boardId: 1, key: "ABC-101" })) as { detail: TicketDetail };
+    expect(detail.stageEvents[0]).toMatchObject({ stage: "planning", note: "Plan round 1 withdrawn: the agent asked D-1" });
+  });
+
+  it("lets the agent and the CLI withdraw an open round", async () => {
+    const { harness, world } = await setup(noReview);
+    world.files[path] = PLAN;
+    await submit(harness);
+    expect(await harness.behavior.callAgentTool(WITHDRAW_PLAN_TOOL, { note: "needs a rework" }, { threadId: "thr_lead1" })).toBe(
+      "Plan round 1 for ABC-101 is withdrawn. Submit the plan again with conductor_submit_plan when it is ready.",
+    );
+    expect(await harness.behavior.callAgentTool(WITHDRAW_PLAN_TOOL, {}, { threadId: "thr_lead1" })).toMatchObject({
+      isError: true,
+      content: [{ text: "No plan round is open for ABC-101." }],
+    });
+
+    await submit(harness);
+    await harness.behavior.runCli(["withdraw-plan", "ABC-101", "--note", "split into two tickets"]);
+    expect((await rounds(harness)).map((r) => [r.n, r.status])).toEqual([
+      [2, "withdrawn"],
+      [1, "withdrawn"],
+    ]);
+    const board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+    expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ stage: "planning", stageNote: "Plan round 2 withdrawn: split into two tickets" });
+  });
+
   it("never lets the plans folder supersede a submitted round; an edited file only marks it changed", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pb-plans-"));
     const file = join(dir, "2026-11-04-abc101-avatars.md");
@@ -1166,7 +1216,7 @@ describe("agent configuration", () => {
       thread: { id: "thr_impl1" },
       pluginMetadata: { boardId: 1, ticketKey: "ABC-101", role: "implementer" },
     });
-    expect(config.tools.map((t) => t.name).sort()).toEqual([ASK_TOOL, REPORT_TOOL, SUBMIT_PLAN_TOOL]);
+    expect(config.tools.map((t) => t.name).sort()).toEqual([ASK_TOOL, REPORT_TOOL, SUBMIT_PLAN_TOOL, WITHDRAW_PLAN_TOOL]);
     expect(config.skills).toEqual([SKILL]);
     expect(config.instructions).toContain('ticket "ABC-101" as its implementer');
     expect(config.instructions).toContain("conductor_ask_decision");
@@ -1178,7 +1228,7 @@ describe("agent configuration", () => {
       board: { userName: "Sam", rules: { askDecisions: false, splitPrs: true }, extraRules: "Never deploy.\nAsk before merging." },
     });
     const config = await resolve(harness, { thread: { id: "thr_lead1" }, pluginMetadata: { boardId: 1, ticketKey: "ABC-101", role: "lead" } });
-    expect(config.tools.map((t) => t.name).sort()).toEqual([REPORT_TOOL, SUBMIT_PLAN_TOOL]);
+    expect(config.tools.map((t) => t.name).sort()).toEqual([REPORT_TOOL, SUBMIT_PLAN_TOOL, WITHDRAW_PLAN_TOOL]);
     expect(config.instructions).not.toContain("conductor_ask_decision");
     expect(config.instructions).toContain("stacked PRs by layer");
     expect(config.instructions).toContain("Rules Sam set for this board (board configuration, quoted):\n> Never deploy.\n> Ask before merging.");

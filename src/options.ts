@@ -124,7 +124,7 @@ export const RULES: RuleText[] = [
     title: "Plan rounds",
     summary: "Agents write their plan to a file and send it to the board; you mark it up and approve it before they build.",
     text: (user) =>
-      `Before writing code, write your plan to a Markdown file and send it with conductor_submit_plan, then end your turn. ${user} marks it up on the board and approves it or requests changes. On changes, revise the same file and submit it again; once approved, report building and start.`,
+      `Before writing code, write your plan to a Markdown file. Ask any open questions first and wait for the answers; then send the plan with conductor_submit_plan and end your turn. ${user} marks it up on the board and approves it or requests changes. On changes, or when an answer changes the plan, revise the same file and submit it again as a new round; once approved, report building and start. Asking a decision while a round is open withdraws it; withdraw it yourself with conductor_withdraw_plan if the plan needs rework before review.`,
   },
   {
     id: "onePrAtATime",
