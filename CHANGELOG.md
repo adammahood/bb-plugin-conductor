@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+- Plans wait for answers: `conductor_submit_plan` refuses a plan while the ticket has open decisions, naming them and telling the agent to fold the answers in first.
+- Withdraw a plan round: the new `conductor_withdraw_plan` tool and `bb conductor withdraw-plan <key> [--note]` take an open round off the board and put the ticket back in Planning.
+- An agent that asks a decision while its plan round is open withdraws the round, so you never review a plan that is about to change. The ticket's history says why.
+- The plan rule and the agent skill say: decisions first, then the plan; any answer folded in means a new round. The skill also documents the Blocked stage.
+
 ## 0.5.0
 
 - New Blocked stage. Agents report `blocked` with `blockedBy` (up to 5 ticket keys) and the reason as the note, or just a note for outside work; `bb conductor report <key> --stage blocked --blocked-by <key> --note ...` does the same. Any other stage clears it.
