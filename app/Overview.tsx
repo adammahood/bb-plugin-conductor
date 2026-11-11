@@ -555,6 +555,10 @@ function CardNote({ ticket }: { ticket: Ticket }) {
   const pushed = ticket.prs.filter((pr) => pr.state !== "local").length;
   const parts: string[] = [];
   if (ticket.stage === "in-review" && merged > 0) parts.push(`${merged} of ${pushed} merged.`);
+  const open = ticket.prs.filter((pr) => pr.state !== "merged" && pr.state !== "closed").length;
+  if (ticket.linearStateType === "completed" && ticket.stage !== "done" && open > 0) {
+    parts.push(`Linear says Done; ${open} PR${open === 1 ? "" : "s"} still open.`);
+  }
   if (ticket.stageNote) parts.push(ticket.stageNote);
   if (parts.length === 0) return null;
   return (

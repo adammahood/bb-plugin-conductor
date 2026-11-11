@@ -86,7 +86,10 @@ The first rule that matches wins:
 2. **Code review** while a Code Review Workspace round waits on you;
    **Building** once you sent comments back, until the agent reports again.
 3. **Plan review** while a plan round waits on you.
-4. **Done** when Linear has the issue in a completed state.
+4. **Done** when Linear has the issue in a completed state and every PR on
+   the ticket is merged or closed. Linear often closes a ticket when the first
+   PR of a chain merges; until the rest land, the card says "Linear says Done;
+   N PRs still open".
 5. **Blocked** when an agent reports it, until it reports another stage.
 6. **In review** when a PR is open for review; **In milestone** when all PRs
    are merged; **Done** once those PRs have reached the default branch: merged

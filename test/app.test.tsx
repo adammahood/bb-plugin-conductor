@@ -361,6 +361,16 @@ describe("done tickets", () => {
   });
 });
 
+describe("Linear and open PRs", () => {
+  it("notes when Linear says Done while PRs are still open", async () => {
+    const closedEarly: Board = { ...board, tickets: [ticket, { ...drafted, linearStateType: "completed", linearState: "Done" }] };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "1" }, { rpc: rpc([decision], [summary], closedEarly) });
+    cleanup = () => slot.lifecycle.unmount();
+    await slot.findByText("Accept avatar uploads on sign-up");
+    expect(slot.getByRole("region", { name: "In review" }).textContent).toContain("Linear says Done; 2 PRs still open.");
+  });
+});
+
 describe("blocked tickets", () => {
   const blocked: Ticket = {
     ...drafted,

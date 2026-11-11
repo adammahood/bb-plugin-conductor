@@ -11,7 +11,7 @@ export interface StageFacts {
   /** Status of the ticket's latest plan round (superseded and withdrawn read as none). */
   planRound: "open" | "approved" | "changes_requested" | null;
   agentRunning: boolean;
-  /** The tracker has the ticket in a completed state. */
+  /** The tracker has the ticket in a completed state; it counts only once every PR is merged or closed. */
   trackerDone: boolean;
   /** Every merged PR's base branch has reached the repo's default branch. */
   landed: boolean;
@@ -47,7 +47,8 @@ export function decideStage(facts: StageFacts): StageDecision {
   // The user's comments are with the agent: it is fixing them until it reports or opens the next round.
   if (facts.reviewRound === "with-agent" && !facts.reportedAfterReview) return { stage: "building", source: "inferred" };
   if (facts.planRound === "open") return { stage: "plan-review", source: "inferred" };
-  if (facts.trackerDone) return { stage: "done", source: "inferred" };
+  // Trackers close a ticket when its first PR merges, while the rest of the chain is still open.
+  if (facts.trackerDone && facts.prs.every(settledPr)) return { stage: "done", source: "inferred" };
   if (reported === "blocked") return { stage: "blocked", source: "reported" };
   // Plan review means a round waits on the user; without one, a plan-review report reads as planning.
   if (reported === "plan-review" && facts.planRound !== "approved" && facts.prs.length === 0) {
@@ -71,6 +72,10 @@ function inferFromWork(facts: StageFacts): Stage {
   if (pushed.length > 0) return "draft-pr";
   if (facts.agentRunning || facts.planRound === "approved" || facts.prs.length > 0) return "building";
   return "planning";
+}
+
+export function settledPr(pr: PullRequest): boolean {
+  return pr.state === "merged" || pr.state === "closed";
 }
 
 function rank(stage: Stage): number {

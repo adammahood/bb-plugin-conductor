@@ -107,7 +107,7 @@ describe("decideStage", () => {
     expect(decideStage(blocked)).toMatchObject({ stage: "blocked", source: "reported" });
     expect(decideStage({ ...blocked, reviewRound: "needs-review" }).stage).toBe("code-review");
     expect(decideStage({ ...blocked, planRound: "open" }).stage).toBe("plan-review");
-    expect(decideStage({ ...blocked, trackerDone: true }).stage).toBe("done");
+    expect(decideStage({ ...blocked, trackerDone: true, prs: [pr(56, "merged")] }).stage).toBe("done");
     expect(decideStage({ ...blocked, prs: [pr(56, "open")] }).stage).toBe("blocked");
   });
 
@@ -123,9 +123,14 @@ describe("decideStage", () => {
     expect(decideStage(facts({ prs: [pr(57, "held")] })).stage).toBe("draft-pr");
   });
 
-  it("is Done when the tracker says so, unless something waits on the user or the ticket is paused", () => {
-    const done = facts({ trackerDone: true, prs: [pr(56, "merged"), pr(57, "draft")], reported: "in-review" });
+  it("is Done when the tracker says so and every PR is merged or closed, unless something waits on the user or the ticket is paused", () => {
+    // The tracker closes the ticket when the first PR of a chain merges; the rest keep it open.
+    for (const state of ["open", "draft", "held", "local"] as const) {
+      expect(decideStage(facts({ trackerDone: true, prs: [pr(63, "merged"), pr(64, state)], reported: "in-review" })).stage).not.toBe("done");
+    }
+    const done = facts({ trackerDone: true, prs: [pr(56, "merged"), pr(57, "closed")], reported: "in-review" });
     expect(decideStage(done)).toMatchObject({ stage: "done", source: "inferred" });
+    expect(decideStage(facts({ trackerDone: true })).stage).toBe("done");
     expect(decideStage({ ...done, reviewRound: "needs-review" }).stage).toBe("code-review");
     expect(decideStage({ ...done, planRound: "open" }).stage).toBe("plan-review");
     expect(decideStage({ ...done, reported: "paused" }).stage).toBe("paused");

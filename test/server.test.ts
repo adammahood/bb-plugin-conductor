@@ -586,20 +586,24 @@ describe("done after release", () => {
     expect(await stageOf(direct.harness, "ABC-102")).toBe("done");
   });
 
-  it("is Done when Linear has the issue in a completed state, even with a PR held open", async () => {
-    const { harness } = await setup({
-      world: {
-        ...noReview,
-        bindings: {
-          thr_lead1: {
-            binding: { issueId: "issue-1126", identifier: "ABC-101", title: "Accept avatar uploads", stateName: "Done", url: null, tone: "completed" },
-            suggestion: null,
-          },
-        },
-      },
+  it("is Done when Linear has the issue completed only once every PR is merged or closed, and archives only then", async () => {
+    const binding = { issueId: "issue-1126", identifier: "ABC-101", title: "Accept avatar uploads", stateName: "In Progress", url: null, tone: "started" };
+    const { harness, calls } = await setup({
+      board: { archiveDoneThreads: true },
+      world: { ...noReview, bindings: { thr_lead1: { binding, suggestion: null } } },
     });
-    await harness.behavior.callAgentTool(REPORT_TOOL, { stage: "in-review", prs: [merged(40), { ...merged(41), state: "draft" }] }, { threadId: "thr_lead1" });
-    expect(await stageOf(harness, "ABC-101")).toBe("done");
+    await harness.behavior.callAgentTool(REPORT_TOOL, { stage: "in-review", prs: [merged(40), { ...merged(41), state: "open" }] }, { threadId: "thr_lead1" });
+    // Linear closes the ticket when #40 merges into the milestone; #41 is still in review.
+    Object.assign(binding, { stateName: "Done", tone: "completed" });
+    await harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    let board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+    expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ stage: "in-review", doneAt: null, archive: null });
+    expect(calls.archive).toEqual([]);
+
+    await harness.behavior.callAgentTool(REPORT_TOOL, { prs: [merged(40), merged(41)] }, { threadId: "thr_lead1" });
+    await harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+    expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ stage: "done", archive: { state: "archived" } });
   });
 
   it("reads Linear state on each sweep for tickets without a thread binding", async () => {
