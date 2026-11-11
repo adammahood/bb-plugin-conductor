@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2
+
+- Linear's Done counts only once every PR on the ticket is merged or closed. Linear often closes a ticket when the first PR of a chain merges; the board now keeps the ticket at its PR or reported stage (In review, Draft PRs, …) instead of showing it Done, hiding it and archiving its threads.
+- The card says "Linear says Done; N PRs still open" while that is the case.
+- This replaces 0.3.1's rule that a held or draft PR does not keep a Linear-Done ticket out of Done: held, draft and unpushed PRs now keep it out too.
+
 ## 0.5.1
 
 - Plans wait for answers: `conductor_submit_plan` refuses a plan while the ticket has open decisions, naming them and telling the agent to fold the answers in first.
