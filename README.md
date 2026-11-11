@@ -26,8 +26,8 @@ answer goes straight back to the agent that asked.
   plan is refused while the ticket has open decisions), and asking one while
   a round is open withdraws it; agents can also withdraw a round themselves.
   A round stays open until you decide it or the agent submits again; if the agent edits the file in between, the round says
-  so. With a plans folder set, a plan found there opens a round on its own,
-  but only for tickets whose agent never submitted one.
+  so. A plan reaches you only when the agent submits it; with a plans folder
+  set, a ticket's page shows its file there as an unsubmitted draft.
 - **The orchestrator beside the board.** The side panel has an Orchestrator
   tab, and clicking an agent on a card opens its thread as a tab.
 - **Ticket context on every agent thread**: Info rows, a line above the

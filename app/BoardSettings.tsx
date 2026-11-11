@@ -29,7 +29,7 @@ const FIELDS: { key: TextField; label: string; hint: string; placeholder?: strin
   {
     key: "plansDir",
     label: "Plans folder",
-    hint: "Folder on the bb server with <date>-<key>-<slug>.md plans. Lets the board spot a plan waiting on you.",
+    hint: "Folder on the bb server with <date>-<key>-<slug>.md plans. A ticket's page shows its file there as a draft until the agent submits it.",
   },
   { key: "githubOwner", label: "GitHub owner", hint: "Builds PR links when agents report repo#123." },
 ];

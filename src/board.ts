@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
@@ -53,9 +53,6 @@ interface Facts {
   threads: Map<string, { environmentId: string | null; archivedAt: number | null }>;
   reviews: WaitingReview[];
 }
-
-/** Reported stages (or none) in which a plan can still be waiting for review. */
-const PLANNING_STAGES = new Set<Stage | null>([null, "planning", "plan-review"]);
 
 const isRunning = (status: string | undefined) =>
   status !== undefined && (RUNNING_STATUSES as readonly string[]).includes(status);
@@ -141,7 +138,7 @@ export class BoardEngine {
     this.facts.statuses = statuses;
     this.facts.threads = threads;
     await this.refreshReviews(ids);
-    await this.inferPlanRounds(this.store.listTickets());
+    this.withdrawFolderRounds(this.store.listTickets());
     await this.checkSubmittedPlans(this.store.listTickets());
     await this.refreshLandings(this.store.listTickets());
   }
@@ -210,67 +207,28 @@ export class BoardEngine {
   }
 
   /**
-   * The plans-folder fallback for agents that do not submit their plan: a
-   * `<date>-<key>-<slug>.md` file, no PRs and no commits past the base, and
-   * the lead idle opens a round from the file. A changed file opens the next
-   * round; a reply in the lead thread closes an open inferred round, since the
-   * user answered there instead.
+   * Plans reach the user only when the agent submits them. Rounds an older
+   * version opened from the plans folder on its own are withdrawn.
    */
-  private async inferPlanRounds(tickets: Ticket[]): Promise<void> {
-    const dir = this.config().plansDir;
-    if (!dir) return;
-    let files: string[];
-    try {
-      files = (await readdir(dir)).filter((name) => name.endsWith(".md"));
-    } catch {
-      return;
-    }
+  private withdrawFolderRounds(tickets: Ticket[]): void {
     for (const ticket of tickets) {
-      const rounds = this.store.planRounds(ticket.key);
-      const latest = rounds[0] ?? null;
-      // Only a ticket still planning can be waiting on a plan; a stale inferred round closes.
-      const planning = ticket.prs.length === 0 && PLANNING_STAGES.has(ticket.reportedStage);
-      if (!planning) {
-        if (latest?.status === "open" && latest.source === "inferred") this.store.root.closeRound(latest.id, "withdrawn");
-        continue;
-      }
-      // Once the agent submits plans itself, the folder is only a copy of its work.
-      if (rounds.some((round) => round.source === "submitted")) continue;
-      const tag = `-${ticket.key.toLowerCase().replace(/-/g, "")}-`;
-      const file = files.filter((name) => name.includes(tag)).sort().at(-1);
-      if (!file) continue;
-      try {
-        let open = latest?.status === "open" ? latest : null;
-        if (open) {
-          const repliedAt = await this.lastUserReplyAt(ticket.leadThreadId);
-          if (repliedAt !== null && repliedAt > open.submittedAt) {
-            this.store.root.closeRound(open.id, "withdrawn");
-            open = null;
-          }
-        }
-        if (isRunning(this.facts.statuses.get(ticket.leadThreadId))) continue;
-        const content = await readFile(join(dir, file), "utf8");
-        const sha256 = createHash("sha256").update(content).digest("hex");
-        if (open) {
-          // Edits refresh an unmarked round in place; a marked one keeps its copy and says the file moved on.
-          if (open.marks === 0 && open.sha256 !== sha256) this.store.root.replaceRoundContent(open.id, content, sha256);
-          else this.store.root.setRoundFileSha(open.id, sha256 === open.sha256 ? null : sha256);
-          continue;
-        }
-        if (latest?.sha256 === sha256) continue;
-        if (!(await this.noCommits(ticket.environmentId))) continue;
-        this.store.openRound({
-          ticketKey: ticket.key,
-          threadId: ticket.leadThreadId,
-          path: join(dir, file),
-          content,
-          sha256,
-          source: "inferred",
-          summary: null,
-        });
-      } catch (error) {
-        this.bb.log.warn(`plan round ${ticket.key}: ${String(error)}`);
-      }
+      const open = this.store.planRounds(ticket.key).find((r) => r.status === "open");
+      if (open?.source === "inferred") this.closeOpenRound(ticket.key, null, "found in the plans folder, never submitted");
+    }
+  }
+
+  /** The newest `<date>-<key>-<slug>.md` file for the ticket in the plans folder: a draft until the agent submits it. */
+  private async draftPlan(key: string): Promise<{ path: string; modifiedAt: number } | null> {
+    const dir = this.config().plansDir;
+    if (!dir) return null;
+    try {
+      const tag = `-${key.toLowerCase().replace(/-/g, "")}-`;
+      const file = (await readdir(dir)).filter((name) => name.endsWith(".md") && name.includes(tag)).sort().at(-1);
+      if (!file) return null;
+      const path = join(dir, file);
+      return { path, modifiedAt: (await stat(path)).mtimeMs };
+    } catch {
+      return null;
     }
   }
 
@@ -345,41 +303,10 @@ export class BoardEngine {
     }
   }
 
-  /** When the user last wrote in the thread themselves; relays from other threads do not count. */
-  private async lastUserReplyAt(threadId: string): Promise<number | null> {
-    const events = await this.bb.sdk.threads.events.list({
-      threadId,
-      order: "desc",
-      limit: "50",
-      types: ["client/turn/requested"] as never,
-    });
-    for (const event of events) {
-      const data = (event.data ?? {}) as { initiator?: string; senderThreadId?: string | null; source?: string };
-      if (data.initiator === "user" && !data.senderThreadId && data.source !== "spawn") return event.createdAt;
-    }
-    return null;
-  }
-
-  private async noCommits(environmentId: string | null): Promise<boolean> {
-    if (!environmentId) return true;
-    try {
-      const status = (await this.bb.sdk.environments.status({ environmentId })) as {
-        workspace?: { mergeBase?: { aheadCount?: number } | null };
-      };
-      return (status.workspace?.mergeBase?.aheadCount ?? 0) === 0;
-    } catch {
-      return true;
-    }
-  }
-
   /** Keeps agent status live between sweeps. */
   async threadStatusChanged(threadId: string, status: string): Promise<void> {
     if (this.store.threadTickets(threadId).length === 0) return;
     this.facts.statuses.set(threadId, status);
-    if (!isRunning(status)) {
-      const leading = this.store.listTickets().filter((t) => t.leadThreadId === threadId);
-      if (leading.length > 0) await this.inferPlanRounds(leading);
-    }
     this.changed();
   }
 
@@ -733,9 +660,10 @@ export class BoardEngine {
     const stored = this.store.getTicket(key);
     if (!stored) return null;
     const issueId = this.store.linearIssueId(key);
-    const [linear, reviews] = await Promise.all([
+    const [linear, reviews, draftPlan] = await Promise.all([
       issueId && this.integrations().linear ? linearIssue(this.bb, issueId) : Promise.resolve(null),
       this.integrations().codeReview ? reviewsForThreads(this.bb, this.store.threadIds(key)) : Promise.resolve([]),
+      this.draftPlan(key),
     ]);
     return {
       ticket: this.withStage(stored),
@@ -745,6 +673,8 @@ export class BoardEngine {
         .filter((r) => r.ticketKey === key)
         .map(({ ticketKey: _, ...review }) => review),
       linear,
+      // A file already sent as the open round is not a draft.
+      draftPlan: draftPlan && stored.planRound?.status === "open" && stored.planRound.path === draftPlan.path ? null : draftPlan,
     };
   }
 

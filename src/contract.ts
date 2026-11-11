@@ -224,6 +224,8 @@ export const ticketDetailSchema = z.object({
   stageEvents: z.array(stageEventSchema),
   reviews: z.array(reviewSchema),
   linear: linearIssueSchema.nullable(),
+  /** A plan file for the ticket in the plans folder that the agent has not submitted. */
+  draftPlan: z.object({ path: z.string(), modifiedAt: z.number() }).nullable(),
 });
 export type TicketDetail = z.infer<typeof ticketDetailSchema>;
 

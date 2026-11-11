@@ -269,7 +269,7 @@ async function setup(
     await harness.behavior.callRpc("boards.update", { boardId: 1, options: { githubOwner: "acme", ...options.board } });
     await harness.behavior.callRpc("board.refresh", { boardId: 1 });
   }
-  return { harness, metadata, sent, world, ghCalls, calls };
+  return { harness, metadata, sent, world, ghCalls, calls, bb };
 }
 
 type Harness = Awaited<ReturnType<typeof setup>>["harness"];
@@ -996,34 +996,6 @@ describe("plan review", () => {
     expect(sent).toHaveLength(1);
   });
 
-  it("opens a round on its own from a waiting plan in the plans folder, and closes it when the user replies in the thread", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pb-plans-"));
-    const file = join(dir, "2026-10-28-abc102-image-sizes.md");
-    writeFileSync(file, "# plan");
-    utimesSync(file, 1000, 1000);
-    const { harness, world } = await setup({ board: { plansDir: dir } });
-
-    let board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
-    expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({
-      stage: "plan-review",
-      stageSource: "inferred",
-      planRound: { n: 1, source: "inferred", status: "open", path: file },
-    });
-
-    // The same file does not open a second round; an agent's message does not close it.
-    world.replies.thr_lead2 = [{ createdAt: Date.now() + 60_000, data: { initiator: "agent", senderThreadId: "thr_other" } }];
-    board = (await harness.behavior.callRpc("board.refresh", { boardId: 1 })) as Board;
-    expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "plan-review", planRound: { n: 1 } });
-
-    world.replies.thr_lead2.unshift({ createdAt: Date.now() + 60_001, data: { initiator: "user", senderThreadId: null, source: "tell" } });
-    board = (await harness.behavior.callRpc("board.refresh", { boardId: 1 })) as Board;
-    expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "planning", planRound: { status: "withdrawn" } });
-
-    writeFileSync(file, "# plan, revised");
-    board = (await harness.behavior.callRpc("board.refresh", { boardId: 1 })) as Board;
-    expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "plan-review", planRound: { n: 2, status: "open" } });
-  });
-
   it("refuses a plan while the ticket has open decisions, and takes it once they are answered", async () => {
     const { harness, world } = await setup(noReview);
     world.files[path] = PLAN;
@@ -1074,6 +1046,40 @@ describe("plan review", () => {
     expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ stage: "planning", stageNote: "Plan round 2 withdrawn: split into two tickets" });
   });
 
+  it("never opens a round from a plan file in the folder; the ticket page shows it as a draft until the agent submits it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pb-plans-"));
+    const file = join(dir, "2026-11-11-abc101-avatars.md");
+    writeFileSync(file, PLAN);
+    const { harness, world } = await setup({ ...noReview, board: { plansDir: dir } });
+    world.files[file] = PLAN;
+    await ask(harness, "thr_lead1");
+    await harness.behavior.callRpc("board.refresh", { boardId: 1 });
+
+    const board = (await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board;
+    expect(board.plansWaiting).toEqual([]);
+    expect(board.tickets.find((t) => t.key === "ABC-101")).toMatchObject({ stage: "planning", planRound: null });
+    let { detail } = (await harness.behavior.callRpc("board.ticket", { boardId: 1, key: "ABC-101" })) as { detail: TicketDetail };
+    expect(detail.draftPlan).toMatchObject({ path: file });
+
+    await harness.behavior.callRpc("decisions.answer", { id: 1, choice: "AvatarURL" });
+    await submit(harness, { path: file });
+    ({ detail } = (await harness.behavior.callRpc("board.ticket", { boardId: 1, key: "ABC-101" })) as { detail: TicketDetail });
+    expect(detail.ticket).toMatchObject({ stage: "plan-review", planRound: { n: 1, source: "submitted" } });
+    expect(detail.draftPlan).toBeNull();
+  });
+
+  it("withdraws a round an older version opened from the plans folder", async () => {
+    const { harness, world, bb } = await setup(noReview);
+    world.files[path] = PLAN;
+    await submit(harness);
+    bb.storage.database().prepare(`UPDATE plan_rounds SET source = 'inferred'`).run();
+    await harness.behavior.callRpc("board.refresh", { boardId: 1 });
+    expect(await rounds(harness)).toEqual([expect.objectContaining({ n: 1, status: "withdrawn" })]);
+    const { detail } = (await harness.behavior.callRpc("board.ticket", { boardId: 1, key: "ABC-101" })) as { detail: TicketDetail };
+    expect(detail.ticket.stage).toBe("planning");
+    expect(detail.stageEvents[0]).toMatchObject({ note: "Plan round 1 withdrawn: found in the plans folder, never submitted" });
+  });
+
   it("never lets the plans folder supersede a submitted round; an edited file only marks it changed", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pb-plans-"));
     const file = join(dir, "2026-11-04-abc101-avatars.md");
@@ -1102,54 +1108,6 @@ describe("plan review", () => {
     ]);
   });
 
-  it("refreshes an unmarked inferred round in place, and orchestrator relays do not close it", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pb-plans-"));
-    const file = join(dir, "2026-11-04-abc102-image-sizes.md");
-    writeFileSync(file, "# plan");
-    const { harness, world } = await setup({ board: { plansDir: dir } });
-    const ticketRounds = async () =>
-      ((await harness.behavior.callRpc("plans.list", { boardId: 1, key: "ABC-102" })) as { rounds: PlanRound[] }).rounds;
-
-    writeFileSync(file, "# plan, edited");
-    world.replies.thr_lead2 = [
-      { createdAt: Date.now() + 60_000, data: { initiator: "user", senderThreadId: ORCH, source: "tell" } },
-    ];
-    await harness.behavior.callRpc("board.refresh", { boardId: 1 });
-    let all = await ticketRounds();
-    expect(all).toEqual([expect.objectContaining({ n: 1, source: "inferred", status: "open", fileChanged: false })]);
-    expect(((await harness.behavior.callRpc("plans.get", { roundId: all[0]!.id })) as { content: string }).content).toBe(
-      "# plan, edited",
-    );
-
-    // With marks on it, the round keeps the text they point at.
-    await harness.behavior.callRpc("plans.mark.save", {
-      roundId: all[0]!.id,
-      kind: "comment",
-      quote: "plan",
-      startLine: 1,
-      endLine: 1,
-      comment: "Say which sizes",
-    });
-    writeFileSync(file, "# plan, edited again");
-    await harness.behavior.callRpc("board.refresh", { boardId: 1 });
-    all = await ticketRounds();
-    expect(all).toEqual([expect.objectContaining({ n: 1, status: "open", fileChanged: true })]);
-    expect(((await harness.behavior.callRpc("plans.get", { roundId: all[0]!.id })) as { content: string }).content).toBe(
-      "# plan, edited",
-    );
-  });
-
-  it("leaves tickets that moved past planning alone, and closes a stale inferred round", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pb-plans-"));
-    writeFileSync(join(dir, "2026-10-28-abc102-image-sizes.md"), "# plan");
-    const { harness } = await setup({ board: { plansDir: dir } });
-    expect(((await harness.behavior.callRpc("board.list", { boardId: 1 })) as Board).plansWaiting).toHaveLength(1);
-
-    await harness.behavior.runCli(["report", "ABC-102", "--stage", "done"]);
-    const board = (await harness.behavior.callRpc("board.refresh", { boardId: 1 })) as Board;
-    expect(board.tickets.find((t) => t.key === "ABC-102")).toMatchObject({ stage: "done", planRound: { status: "withdrawn" } });
-    expect(board.plansWaiting).toEqual([]);
-  });
 });
 
 describe("import from Phase Board", () => {

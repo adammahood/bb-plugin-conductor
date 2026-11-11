@@ -468,13 +468,6 @@ export class Store {
     this.db.prepare(`UPDATE plan_rounds SET file_sha256 = ? WHERE id = ? AND status = 'open'`).run(sha256, roundId);
   }
 
-  /** Replaces an open round's copy with the file's new text; only for rounds without marks. */
-  replaceRoundContent(roundId: number, content: string, sha256: string): void {
-    this.db
-      .prepare(`UPDATE plan_rounds SET content = ?, sha256 = ?, file_sha256 = NULL WHERE id = ? AND status = 'open'`)
-      .run(content, sha256, roundId);
-  }
-
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
   }

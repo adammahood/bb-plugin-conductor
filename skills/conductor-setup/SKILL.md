@@ -40,8 +40,9 @@ Agents get rule changes when their next session starts.
 
 ## Plan review
 
-Agents send plans with `conductor_submit_plan`; with a plans folder set, a
-waiting `<date>-<key>-<slug>.md` plan opens a round on its own. Open a plan
+Agents send plans with `conductor_submit_plan`; only a submitted plan reaches
+the user. With a plans folder set, a `<date>-<key>-<slug>.md` file there shows
+on the ticket page as an unsubmitted draft. Open a plan
 from Waiting on you, the ticket card or the ticket page, select text to
 comment on it, remove it or replace it, and approve or request changes. The
 marks go to the agent as one message; every round keeps its copy of the plan,

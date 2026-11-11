@@ -130,7 +130,7 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
   if (error) return <Empty>{errorText(error)}</Empty>;
   if (!data) return <Empty>Loading…</Empty>;
   if (!data.detail) return <Empty>No ticket {ticketKey} on the board.</Empty>;
-  const { ticket, decisions, stageEvents, reviews, linear } = data.detail;
+  const { ticket, decisions, stageEvents, reviews, linear, draftPlan } = data.detail;
 
   return (
     <>
@@ -194,6 +194,15 @@ function TicketView({ boardId, ticketKey }: { boardId: number; ticketKey: string
             </button>
           </p>
         </Section>
+      )}
+      {draftPlan && (
+        <p className="text-sm text-muted-foreground">
+          Draft plan in the plans folder, not submitted:{" "}
+          <span className="font-mono text-xs" title={draftPlan.path}>
+            {draftPlan.path.split("/").at(-1)}
+          </span>{" "}
+          ({formatTime(draftPlan.modifiedAt)}). It reaches you when the agent submits it.
+        </p>
       )}
 
       <Section title="Decisions" count={decisions.length}>
