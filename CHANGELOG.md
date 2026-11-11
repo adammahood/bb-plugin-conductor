@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.3
+
+- A plan reaches you only when the agent submits it with `conductor_submit_plan`, which also refuses while the ticket has open decisions. A plan file in the plans folder no longer opens a round on its own; the ticket page shows it as an unsubmitted draft.
+- Rounds an earlier version opened from the plans folder are withdrawn on the first sweep, with the reason in the ticket's history.
+
 ## 0.5.2
 
 - Linear's Done counts only once every PR on the ticket is merged or closed. Linear often closes a ticket when the first PR of a chain merges; the board now keeps the ticket at its PR or reported stage (In review, Draft PRs, …) instead of showing it Done, hiding it and archiving its threads.
